@@ -16,6 +16,8 @@ add_definitions(-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LA
 # default to ON
 set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "Default value for ``POSITION_INDEPENDENT_CODE`` of targets.")
 
+option(BUILD_JNI_LIB "build JNI shared lib [default: off]")
+option(BUILD_SHARED_LIB "build lighttpd as shared library [default: off]")
 option(WITH_XATTR "with xattr-support for the stat-cache [default: off]")
 option(WITH_MYSQL "with mysql-support for mod_vhostdb_mysql [default: off]")
 option(WITH_PGSQL "with postgres-support for mod_vhostdb_pgsql [default: off]")
@@ -900,27 +902,52 @@ add_executable(lighttpd-angel lighttpd-angel.c)
 set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd-angel)
 add_target_properties(lighttpd-angel COMPILE_FLAGS "-DSBIN_DIR=\\\\\"${CMAKE_INSTALL_PREFIX}/${SBINDIR}\\\\\"")
 
-add_executable(lighttpd
-	server.c
-	response.c
-	connections.c
-	h2.c
-	reqpool.c
-	plugin.c
-	sock_addr_cache.c
-	ls-hpack/lshpack.c
-	algo_xxhash.c
-	fdevent_impl.c
-	http_range.c
-	network.c
-	network_write.c
-	data_config.c
-	vector.c
-	configfile.c
-	configparser.c
-	${COMMON_SRC}
-)
-set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
+if (BUILD_JNI_LIB OR BUILD_SHARED_LIB)
+  add_library(lighttpd SHARED
+    server.c
+    response.c
+    connections.c
+    h2.c
+    reqpool.c
+    plugin.c
+    sock_addr_cache.c
+    ls-hpack/lshpack.c
+    algo_xxhash.c
+    fdevent_impl.c
+    http_range.c
+    network.c
+    network_write.c
+    data_config.c
+    vector.c
+    configfile.c
+    configparser.c
+    ${COMMON_SRC}
+  )
+  add_executable(libtest libtest.c)
+  target_link_libraries(libtest lighttpd)
+else()
+  add_executable(lighttpd
+    server.c
+    response.c
+    connections.c
+    h2.c
+    reqpool.c
+    plugin.c
+    sock_addr_cache.c
+    ls-hpack/lshpack.c
+    algo_xxhash.c
+    fdevent_impl.c
+    http_range.c
+    network.c
+    network_write.c
+    data_config.c
+    vector.c
+    configfile.c
+    configparser.c
+    ${COMMON_SRC}
+  )
+  set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
+endif()
 
 add_and_install_library(mod_access mod_access.c)
 add_and_install_library(mod_accesslog mod_accesslog.c)

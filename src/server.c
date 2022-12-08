@@ -2065,9 +2065,55 @@ static int main_init_once (void) {
     return 1;
 }
 
+#if defined BUILD_JNI_LIB && defined BUILD_SHARED_LIB
+#   error "BUILD_JNI_LIB and BUILD_SHARED_LIB cannot be used together"
+#endif
+
+#ifdef BUILD_JNI_LIB
+
+#include <jni.h>
+
+JNIEXPORT void JNICALL Java_com_lighttpd_Server_launch(
+    JNIEnv *env,
+    jobject thisObject,
+    jstring configPath,
+    jstring modulesPath
+) {
+
+#elif defined BUILD_SHARED_LIB
+
+int launch_lighttpd(const char *config_path, const char *modules_path) {
+
+#else
+
 __attribute_cold__
 int main (int argc, char ** argv) {
+
+#endif
+
     if (!main_init_once()) return -1;
+
+    #ifdef BUILD_JNI_LIB
+    // BEWARE: Before exit from this function do not forget to release these
+    // strings via a call to JNI's ReleaseStringUTFChars function.
+    const char *config_path = env->GetStringUTFChars(configPath, 0);
+    const char *modules_path = env->GetStringUTFChars(modulesPath, 0);
+    #endif
+
+    #if defined BUILD_JNI_LIB || defined BUILD_SHARED_LIB
+    char *argv[6];
+    argv[0] = "";
+    argv[1] = "-D";
+    int argc = 2;
+    if (config_path) {
+      argv[argc++] = "-f";
+      argv[argc++] = config_path;
+    }
+    if (modules_path) {
+      argv[argc++] = "-m";
+      argv[argc++] = modules_path;
+    }
+    #endif
 
     int rc;
 
@@ -2123,6 +2169,11 @@ int main (int argc, char ** argv) {
         /* wait for all children to exit before graceful restart */
         while (fdevent_waitpid(-1, NULL, 0) > 0) ;
     } while (graceful_restart);
+
+    #ifdef BUILD_JNI_LIB
+    env->ReleaseStringUTFChars(configPath, config_path);
+    env->ReleaseStringUTFChars(modulesPath, modules_path);
+    #endif
 
     return rc;
 }
