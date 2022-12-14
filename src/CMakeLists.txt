@@ -923,8 +923,6 @@ if (BUILD_JNI_LIB OR BUILD_SHARED_LIB)
     configparser.c
     ${COMMON_SRC}
   )
-  add_executable(libtest libtest.c)
-  target_link_libraries(libtest lighttpd)
 else()
   add_executable(lighttpd
     server.c

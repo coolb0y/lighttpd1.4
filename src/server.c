@@ -2073,7 +2073,7 @@ static int main_init_once (void) {
 
 #include <jni.h>
 
-JNIEXPORT void JNICALL Java_com_lighttpd_Server_launch(
+JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
     JNIEnv *env,
     jobject thisObject,
     jstring configPath,
@@ -2096,8 +2096,8 @@ int main (int argc, char ** argv) {
     #ifdef BUILD_JNI_LIB
     // BEWARE: Before exit from this function do not forget to release these
     // strings via a call to JNI's ReleaseStringUTFChars function.
-    const char *config_path = env->GetStringUTFChars(configPath, 0);
-    const char *modules_path = env->GetStringUTFChars(modulesPath, 0);
+    const char *config_path = (*env)->GetStringUTFChars(env, configPath, 0);
+    const char *modules_path = (*env)->GetStringUTFChars(env, modulesPath, 0);
     #endif
 
     #if defined BUILD_JNI_LIB || defined BUILD_SHARED_LIB
@@ -2171,8 +2171,8 @@ int main (int argc, char ** argv) {
     } while (graceful_restart);
 
     #ifdef BUILD_JNI_LIB
-    env->ReleaseStringUTFChars(configPath, config_path);
-    env->ReleaseStringUTFChars(modulesPath, modules_path);
+    (*env)->ReleaseStringUTFChars(env, configPath, config_path);
+    (*env)->ReleaseStringUTFChars(env, modulesPath, modules_path);
     #endif
 
     return rc;
