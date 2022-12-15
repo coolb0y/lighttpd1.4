@@ -3,13 +3,13 @@
 #define _XOPEN_SOURCE 700
 #endif
 
+#include "first.h"
+
 #ifdef BUILD_JNI_LIB
 // For JNI build we implement logging with use of Android NDK methods.
 // See: https://developer.android.com/ndk/reference/group/logging
-# include <log.h>
+# include <android/log.h>
 #endif // BUILD_JNI_LIB
-
-#include "first.h"
 
 #include "log.h"
 
