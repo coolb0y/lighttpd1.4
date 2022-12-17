@@ -903,6 +903,7 @@ set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd-angel)
 add_target_properties(lighttpd-angel COMPILE_FLAGS "-DSBIN_DIR=\\\\\"${CMAKE_INSTALL_PREFIX}/${SBINDIR}\\\\\"")
 
 if (BUILD_JNI_LIB OR BUILD_SHARED_LIB)
+  add_library(lighttpd-common SHARED ${COMMON_SRC})
   add_library(lighttpd SHARED
     server.c
     response.c
@@ -921,8 +922,8 @@ if (BUILD_JNI_LIB OR BUILD_SHARED_LIB)
     vector.c
     configfile.c
     configparser.c
-    ${COMMON_SRC}
   )
+  target_link_libraries(lighttpd lighttpd-common)
 else()
   add_executable(lighttpd
     server.c
@@ -949,6 +950,7 @@ endif()
 
 if (BUILD_JNI_LIB)
   # Links against log library from Android NDK.
+  target_link_libraries(lighttpd-common log)
   target_link_libraries(lighttpd log)
 endif()
 
@@ -1037,6 +1039,11 @@ add_test(NAME test_common COMMAND test_common)
 
 if(HAVE_PCRE)
 	target_link_libraries(lighttpd ${PCRE_LDFLAGS})
+  if (BUILD_JNI_LIB)
+    # For older Android NDK versions PCRE2 library has to be built from sources,
+    # thus linking against it.
+    target_link_libraries(lighttpd-common ${PCRE_LDFLAGS})
+  endif()
 	add_target_properties(lighttpd COMPILE_FLAGS ${PCRE_CFLAGS})
 	target_link_libraries(test_common ${PCRE_LDFLAGS})
 	add_target_properties(test_common COMPILE_FLAGS ${PCRE_CFLAGS})
@@ -1180,6 +1187,13 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
 	if((NOT APPLE) AND (NOT CMAKE_SYSTEM_NAME MATCHES "SunOS"))
 		add_target_properties(lighttpd LINK_FLAGS "-Wl,-export-dynamic")
 	endif()
+endif()
+
+if(BUILD_JNI_LIB)
+  # On Android native code is build with this flag which forbids undefined
+  # function references, thus requring to correctly link all outputs against
+  # shared libraries.
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
 endif()
 
 set_target_properties(lighttpd PROPERTIES CMAKE_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})

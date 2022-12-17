@@ -2073,11 +2073,19 @@ static int main_init_once (void) {
 
 #include <jni.h>
 
+/**
+ * @brief Entrypoint for Android JNI builds. It starts the server using a single
+ * non-JNI specfici parameter: `configPath` - the path to server config.
+ *
+ * @param env
+ * @param thisObject
+ * @param configPath Config file path.
+ * @return Integer status code.
+ */
 JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
     JNIEnv *env,
     jobject thisObject,
-    jstring configPath,
-    jstring modulesPath
+    jstring configPath
 ) {
 
 #elif defined BUILD_SHARED_LIB
@@ -2094,13 +2102,17 @@ int main (int argc, char ** argv) {
     if (!main_init_once()) return -1;
 
     #ifdef BUILD_JNI_LIB
-    // BEWARE: Before exit from this function do not forget to release these
-    // strings via a call to JNI's ReleaseStringUTFChars function.
+    // BEWARE: Before exit from this function do not forget to release this
+    // string via a call to JNI's ReleaseStringUTFChars function.
     const char *config_path = (*env)->GetStringUTFChars(env, configPath, 0);
-    const char *modules_path = (*env)->GetStringUTFChars(env, modulesPath, 0);
     #endif
 
     #if defined BUILD_JNI_LIB || defined BUILD_SHARED_LIB
+    // For builds producing shared libraries, we take expose programmatically-
+    // friendly arguments from special versions of entry point functions,
+    // replacing main() intended for CLI interface, and here we just translate
+    // those programmatically-friendly arguments to corresponding CLI params,
+    // thus eliminating any need to alter the rest of server start-up code.
     char *argv[6];
     argv[0] = "";
     argv[1] = "-D";
@@ -2108,10 +2120,6 @@ int main (int argc, char ** argv) {
     if (config_path) {
       argv[argc++] = "-f";
       argv[argc++] = config_path;
-    }
-    if (modules_path) {
-      argv[argc++] = "-m";
-      argv[argc++] = modules_path;
     }
     #endif
 
@@ -2127,6 +2135,12 @@ int main (int argc, char ** argv) {
 
         rc = server_main_setup(srv, argc, argv);
         if (rc > 0) {
+            #ifdef BUILD_JNI_LIB
+              // Here we signal to JNI the server has started.
+              jclass ServerClass = (*env)->FindClass(env, "com/lighttpd/Server");
+              jmethodID onLaunchedID = (*env)->GetStaticMethodID(env, ServerClass, "onLaunchedCallback", "()V");
+              (*env)->CallStaticVoidMethod(env, ServerClass, onLaunchedID);
+            #endif
 
             server_main_loop(srv);
 
@@ -2172,7 +2186,6 @@ int main (int argc, char ** argv) {
 
     #ifdef BUILD_JNI_LIB
     (*env)->ReleaseStringUTFChars(env, configPath, config_path);
-    (*env)->ReleaseStringUTFChars(env, modulesPath, modules_path);
     #endif
 
     return rc;

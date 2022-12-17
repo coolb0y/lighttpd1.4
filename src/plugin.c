@@ -93,12 +93,6 @@ static void plugins_register(server *srv, plugin *p) {
 	ps[srv->plugins.used++] = p;
 }
 
-/**
- *
- *
- *
- */
-
 #if defined(LIGHTTPD_STATIC)
 
 /* pre-declare functions, as there is no header for them */
@@ -164,8 +158,19 @@ int plugins_load(server *srv) {
 
 	for (uint32_t i = 0; i < srv->srvconf.modules->used; ++i) {
 		const buffer * const module = &((data_string *)srv->srvconf.modules->data[i])->value;
-		buffer_copy_string(tb, srv->srvconf.modules_dir);
-		buffer_append_path_len(tb, BUF_PTR_LEN(module));
+
+    #ifdef BUILD_JNI_LIB
+      // `module-ptr` values are module names prefixed by slash symbols. Here we
+      // remove that slash, so that dlopen() function below treats it as library
+      // name, rather than path, and uses auto-resolution to load the module
+      // from the app's shared libraries folder.
+      buffer_copy_string(tb, module->ptr);
+      buffer_substr_remove(tb, 0, 1);
+    #else
+      buffer_copy_string(tb, srv->srvconf.modules_dir);
+      buffer_append_path_len(tb, BUF_PTR_LEN(module));
+    #endif // BUILD_JNI_LIB
+
 #if defined(__WIN32) || defined(__CYGWIN__)
 		buffer_append_string_len(tb, CONST_STR_LEN(".dll"));
 #else

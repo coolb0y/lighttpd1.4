@@ -10,6 +10,14 @@ macro(ADD_AND_INSTALL_LIBRARY LIBNAME SRCFILES)
 		else()
 			add_library(${LIBNAME} SHARED ${SRCFILES})
 		endif()
+
+    if (BUILD_JNI_LIB)
+      # For JNI builds all code common between different modules is built into
+      # a standalone lighttpd-common library, against which all modules should
+      # be linked to avoid undefined function references.
+      target_link_libraries(${LIBNAME} lighttpd-common)
+    endif()
+
 		set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} ${LIBNAME})
 		## Windows likes to link it this way back to app!
 		if(WIN32)
