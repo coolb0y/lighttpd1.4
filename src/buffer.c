@@ -463,7 +463,7 @@ void buffer_substr_remove (buffer * const restrict b, const size_t offset,
                            const size_t len)
 {
     const size_t blen = buffer_clen(b);
-    memmove(b->ptr+offset, b->ptr+offset+len, len);
+    memmove(b->ptr+offset, b->ptr+offset+len, blen-offset-len);
     buffer_truncate(b, blen-len);
 }
 

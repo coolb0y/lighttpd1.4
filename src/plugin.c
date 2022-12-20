@@ -160,12 +160,12 @@ int plugins_load(server *srv) {
 		const buffer * const module = &((data_string *)srv->srvconf.modules->data[i])->value;
 
     #ifdef BUILD_JNI_LIB
-      // `module-ptr` values are module names prefixed by slash symbols. Here we
-      // remove that slash, so that dlopen() function below treats it as library
-      // name, rather than path, and uses auto-resolution to load the module
-      // from the app's shared libraries folder.
+      // In JNI use case modules are packed alongside other app's shared
+      // libraries, and thus we need to refer the library by name, rather
+      // than by path, and let OS find the correct library path (especially
+      // as libraries might be kept within APK bundle, and loaded directly
+      // from it by OS).
       buffer_copy_string(tb, module->ptr);
-      buffer_substr_remove(tb, 0, 1);
     #else
       buffer_copy_string(tb, srv->srvconf.modules_dir);
       buffer_append_path_len(tb, BUF_PTR_LEN(module));

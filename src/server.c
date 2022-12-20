@@ -1105,6 +1105,12 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	/*pid_fd = -1;*/
 	srv->argv = argv;
 
+  // Resets getopt(), to parse arguments starting from the first one,
+  // rather than after the last one parsed in a previous last getopt()
+  // invokation within the program. It is relevant to the shared library
+  // use case.
+  optind = 1;
+
 	while(-1 != (o = getopt(argc, argv, "f:m:i:hvVD1pt"))) {
 		switch(o) {
 		case 'f':
@@ -2072,6 +2078,19 @@ static int main_init_once (void) {
 #ifdef BUILD_JNI_LIB
 
 #include <jni.h>
+
+/**
+ * @brief Orders graceful server shutdown.
+ *
+ * @return JNIEXPORT
+ */
+JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown(
+  JNIEnv *env,
+  jobject thisObject
+) {
+  graceful_shutdown = 1;
+  srv_shutdown = 1;
+}
 
 /**
  * @brief Entrypoint for Android JNI builds. It starts the server using a single
