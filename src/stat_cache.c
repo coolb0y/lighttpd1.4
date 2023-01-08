@@ -243,9 +243,7 @@ typedef struct stat_cache_fam {
 __attribute_returns_nonnull__
 static fam_dir_entry * fam_dir_entry_init(const char *name, size_t len)
 {
-    fam_dir_entry * const fam_dir = calloc(1, sizeof(*fam_dir));
-    force_assert(NULL != fam_dir);
-
+    fam_dir_entry * const fam_dir = ck_calloc(1, sizeof(*fam_dir));
     buffer_copy_string_len(&fam_dir->name, name, len);
     fam_dir->refcnt = 0;
   #if defined HAVE_SYS_EVENT_H && defined HAVE_KQUEUE
@@ -573,14 +571,21 @@ static handler_t stat_cache_handle_fdevent(void *ctx, int revent)
 }
 
 static stat_cache_fam * stat_cache_init_fam(fdevents *ev, log_error_st *errh) {
-	stat_cache_fam *scf = calloc(1, sizeof(*scf));
-	force_assert(scf);
+	stat_cache_fam *scf = ck_calloc(1, sizeof(*scf));
 	scf->fd = -1;
 	scf->ev = ev;
 	scf->errh = errh;
 
   #ifdef HAVE_SYS_INOTIFY_H
+   #if !defined(IN_NONBLOCK) || !defined(IN_CLOEXEC)
+	scf->fd = inotify_init();
+	if (scf->fd >= 0 && 0 != fdevent_fcntl_set_nb_cloexec(scf->fd)) {
+		close(scf->fd);
+		scf->fd = -1;
+	}
+   #else
 	scf->fd = inotify_init1(IN_NONBLOCK|IN_CLOEXEC);
+   #endif
 	if (scf->fd < 0) {
 		log_perror(errh, __FILE__, __LINE__, "inotify_init1()");
 		free(scf);
@@ -794,10 +799,10 @@ static fam_dir_entry * fam_dir_monitor(stat_cache_fam *scf, char *fn, uint32_t d
 
 
 __attribute_malloc__
+__attribute_noinline__
 __attribute_returns_nonnull__
 static stat_cache_entry * stat_cache_entry_init(void) {
-    stat_cache_entry *sce = calloc(1, sizeof(*sce));
-    force_assert(NULL != sce);
+    stat_cache_entry *sce = ck_calloc(1, sizeof(*sce));
     sce->fd = -1;
     sce->refcnt = 1;
     return sce;

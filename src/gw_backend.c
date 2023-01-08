@@ -158,8 +158,7 @@ __attribute_cold__
 __attribute_noinline__
 __attribute_returns_nonnull__
 static gw_proc *gw_proc_init(gw_host *host) {
-    gw_proc *proc = calloc(1, sizeof(*proc));
-    force_assert(proc);
+    gw_proc *proc = ck_calloc(1, sizeof(*proc));
 
     /*proc->unixsocket = buffer_init();*//*(init on demand)*/
     proc->connection_name = buffer_init();
@@ -175,6 +174,8 @@ static gw_proc *gw_proc_init(gw_host *host) {
     return proc;
 }
 
+__attribute_cold__
+__attribute_noinline__
 static void gw_proc_free(gw_proc *proc) {
     if (!proc) return;
 
@@ -190,9 +191,7 @@ static void gw_proc_free(gw_proc *proc) {
 __attribute_malloc__
 __attribute_returns_nonnull__
 static gw_host *gw_host_init(void) {
-    gw_host *f = calloc(1, sizeof(*f));
-    force_assert(f);
-    return f;
+    return ck_calloc(1, sizeof(gw_host));
 }
 
 static void gw_host_free(gw_host *h) {
@@ -213,9 +212,7 @@ static void gw_host_free(gw_host *h) {
 __attribute_malloc__
 __attribute_returns_nonnull__
 static gw_exts *gw_extensions_init(void) {
-    gw_exts *f = calloc(1, sizeof(*f));
-    force_assert(f);
-    return f;
+    return ck_calloc(1, sizeof(gw_exts));
 }
 
 static void gw_extensions_free(gw_exts *f) {
@@ -241,11 +238,9 @@ static int gw_extension_insert(gw_exts *ext, const buffer *key, gw_host *fh) {
     }
 
     if (NULL == fe) {
-        if (ext->used == ext->size) {
-            ext->size += 8;
-            ext->exts = realloc(ext->exts, ext->size * sizeof(gw_extension));
-            force_assert(ext->exts);
-            memset(ext->exts + ext->used, 0, 8 * sizeof(gw_extension));
+        if (!(ext->used & (8-1))) {
+            ck_realloc_u32((void **)&ext->exts,ext->used,8,sizeof(*ext->exts));
+            memset(ext->exts + ext->used, 0, 8 * sizeof(*ext->exts));
         }
         fe = ext->exts + ext->used++;
         fe->last_used_ndx = -1;
@@ -254,12 +249,8 @@ static int gw_extension_insert(gw_exts *ext, const buffer *key, gw_host *fh) {
         memcpy(b, key, sizeof(buffer)); /*(copy; not later free'd)*/
     }
 
-    if (fe->size == fe->used) {
-        fe->size += 4;
-        fe->hosts = realloc(fe->hosts, fe->size * sizeof(*(fe->hosts)));
-        force_assert(fe->hosts);
-    }
-
+    if (!(fe->used & (4-1)))
+        ck_realloc_u32((void **)&fe->hosts, fe->used, 4, sizeof(*fe->hosts));
     fe->hosts[fe->used++] = fh;
     return 0;
 }
@@ -459,8 +450,7 @@ static int gw_proc_sockaddr_init(gw_host * const host, gw_proc * const proc, log
         proc->saddr = NULL;
     }
     if (NULL == proc->saddr) {
-        proc->saddr = (struct sockaddr *)malloc(addrlen);
-        force_assert(proc->saddr);
+        proc->saddr = (struct sockaddr *)ck_malloc(addrlen);
     }
     proc->saddrlen = addrlen;
     memcpy(proc->saddr, &addr, addrlen);
@@ -472,8 +462,7 @@ static int env_add(char_array *env, const char *key, size_t key_len, const char 
 
     if (!key || !val) return -1;
 
-    dst = malloc(key_len + val_len + 3);
-    force_assert(dst);
+    dst = ck_malloc(key_len + val_len + 3);
     memcpy(dst, key, key_len);
     dst[key_len] = '=';
     memcpy(dst + key_len + 1, val, val_len + 1); /* add the \0 from the value */
@@ -489,15 +478,8 @@ static int env_add(char_array *env, const char *key, size_t key_len, const char 
         }
     }
 
-    if (env->size <= env->used + 1) {
-        env->size += 16;
-        env->ptr = realloc(env->ptr, env->size * sizeof(*env->ptr));
-        force_assert(env->ptr);
-    }
-
-  #ifdef __COVERITY__
-    force_assert(env->ptr); /*(non-NULL if env->used != 0; guaranteed above)*/
-  #endif
+    if (!(env->used & (16-1)))
+        ck_realloc_u32((void **)&env->ptr, env->used, 16, sizeof(*env->ptr));
     env->ptr[env->used++] = dst;
 
     return 0;
@@ -567,7 +549,6 @@ static int gw_spawn_connection(gw_host * const host, gw_proc * const proc, log_e
         {
             /* create environment */
             env.ptr = NULL;
-            env.size = 0;
             env.used = 0;
 
             /* build clean environment */
@@ -614,6 +595,8 @@ static int gw_spawn_connection(gw_host * const host, gw_proc * const proc, log_e
                               CONST_STR_LEN("1"));
             }
 
+            if (!(env.used & (16-1)))
+                ck_realloc_u32((void **)&env.ptr,env.used,1,sizeof(*env.ptr));
             env.ptr[env.used] = NULL;
         }
 
@@ -780,7 +763,7 @@ static gw_host * unixsocket_is_dup(gw_plugin_data *p, const buffer *unixsocket) 
     return NULL;
 }
 
-static int parse_binpath(char_array *env, const buffer *b) {
+static void parse_binpath(char_array *env, const buffer *b) {
     char *start = b->ptr;
     char c;
     /* search for spaces */
@@ -790,11 +773,8 @@ static int parse_binpath(char_array *env, const buffer *b) {
         case '\t':
             /* a WS, stop here and copy the argument */
 
-            if (env->size == env->used) {
-                env->size += 16;
-                env->ptr = realloc(env->ptr, env->size * sizeof(*env->ptr));
-                force_assert(env->ptr);
-            }
+            if (!(env->used & (4-1)))
+                ck_realloc_u32((void**)&env->ptr,env->used,4,sizeof(*env->ptr));
 
             c = b->ptr[i];
             b->ptr[i] = '\0';
@@ -808,23 +788,10 @@ static int parse_binpath(char_array *env, const buffer *b) {
         }
     }
 
-    if (env->size == env->used) { /*need one extra for terminating NULL*/
-        env->size += 16;
-        env->ptr = realloc(env->ptr, env->size * sizeof(*env->ptr));
-    }
-
-    /* the rest */
+    if (!(env->used & (4-1)) || !((env->used+1) & (4-1)))
+        ck_realloc_u32((void **)&env->ptr, env->used, 2, sizeof(*env->ptr));
     env->ptr[env->used++] = strdup(start);
-
-    if (env->size == env->used) { /*need one extra for terminating NULL*/
-        env->size += 16;
-        env->ptr = realloc(env->ptr, env->size * sizeof(*env->ptr));
-    }
-
-    /* terminate */
-    env->ptr[env->used++] = NULL;
-
-    return 0;
+    env->ptr[env->used] = NULL;
 }
 
 enum {
@@ -1114,8 +1081,7 @@ static handler_t gw_process_fdevent(gw_handler_ctx *hctx, request_st *r, int rev
 
 __attribute_returns_nonnull__
 static gw_handler_ctx * handler_ctx_init(size_t sz) {
-    gw_handler_ctx *hctx = calloc(1, 0 == sz ? sizeof(*hctx) : sz);
-    force_assert(hctx);
+    gw_handler_ctx *hctx = ck_calloc(1, 0 == sz ? sizeof(*hctx) : sz);
 
     /*hctx->response = chunk_buffer_acquire();*//*(allocated when needed)*/
 
@@ -1178,7 +1144,7 @@ static void handler_ctx_clear(gw_handler_ctx *hctx) {
 
 
 void * gw_init(void) {
-    return calloc(1, sizeof(gw_plugin_data));
+    return ck_calloc(1, sizeof(gw_plugin_data));
 }
 
 
@@ -1628,19 +1594,14 @@ int gw_set_defaults_backend(server *srv, gw_plugin_data *p, const array *a, gw_p
                         free(host->args.ptr[m]);
                     free(host->args.ptr);
 
-                    host->args.ptr = calloc(4, sizeof(char *));
-                    force_assert(host->args.ptr);
+                    host->args.ptr = ck_calloc(4, sizeof(char *));
                     host->args.used = 3;
-                    host->args.size = 4;
-                    host->args.ptr[0] = malloc(sizeof("/bin/sh"));
-                    force_assert(host->args.ptr[0]);
+                    host->args.ptr[0] = ck_malloc(sizeof("/bin/sh"));
                     memcpy(host->args.ptr[0], "/bin/sh", sizeof("/bin/sh"));
-                    host->args.ptr[1] = malloc(sizeof("-c"));
-                    force_assert(host->args.ptr[1]);
+                    host->args.ptr[1] = ck_malloc(sizeof("-c"));
                     memcpy(host->args.ptr[1], "-c", sizeof("-c"));
-                    host->args.ptr[2] =
-                      malloc(sizeof("exec ")-1+buffer_clen(host->bin_path)+1);
-                    force_assert(host->args.ptr[2]);
+                    host->args.ptr[2] = ck_malloc(sizeof("exec ")-1
+                                              + buffer_clen(host->bin_path)+1);
                     memcpy(host->args.ptr[2], "exec ", sizeof("exec ")-1);
                     memcpy(host->args.ptr[2]+sizeof("exec ")-1,
                            host->bin_path->ptr, buffer_clen(host->bin_path)+1);

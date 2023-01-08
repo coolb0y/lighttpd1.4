@@ -266,13 +266,11 @@ static int network_host_parse_addr(server *srv, sock_addr *addr, socklen_t *addr
 }
 
 static void network_srv_sockets_append(server *srv, server_socket *srv_socket) {
-	if (srv->srv_sockets.used == srv->srv_sockets.size) {
-		srv->srv_sockets.size += 4;
-		srv->srv_sockets.ptr = realloc(srv->srv_sockets.ptr, srv->srv_sockets.size * sizeof(server_socket*));
-		force_assert(NULL != srv->srv_sockets.ptr);
-	}
-
-	srv->srv_sockets.ptr[srv->srv_sockets.used++] = srv_socket;
+    server_socket_array * const srv_sockets = &srv->srv_sockets;
+    if (!(srv_sockets->used & (4-1)))
+        ck_realloc_u32((void **)&srv_sockets->ptr, srv_sockets->used,
+                       4, sizeof(*srv_sockets->ptr));
+    srv_sockets->ptr[srv_sockets->used++] = srv_socket;
 }
 
 typedef struct {
@@ -438,8 +436,7 @@ static int network_server_init(server *srv, const network_socket_config *s, buff
 		}
 	}
 
-	srv_socket = calloc(1, sizeof(*srv_socket));
-	force_assert(NULL != srv_socket);
+	srv_socket = ck_calloc(1, sizeof(*srv_socket));
 	memcpy(&srv_socket->addr, &addr, addr_len);
 	srv_socket->fd = -1;
 	srv_socket->sidx = sidx;
@@ -613,7 +610,6 @@ int network_close(server *srv) {
 	free(srv->srv_sockets.ptr);
 	srv->srv_sockets.ptr = NULL;
 	srv->srv_sockets.used = 0;
-	srv->srv_sockets.size = 0;
 
 	for (uint32_t i = 0; i < srv->srv_sockets_inherited.used; ++i) {
 		server_socket *srv_socket = srv->srv_sockets_inherited.ptr[i];
@@ -629,7 +625,6 @@ int network_close(server *srv) {
 	free(srv->srv_sockets_inherited.ptr);
 	srv->srv_sockets_inherited.ptr = NULL;
 	srv->srv_sockets_inherited.used = 0;
-	srv->srv_sockets_inherited.size = 0;
 
 	return 0;
 }
@@ -783,6 +778,9 @@ int network_init(server *srv, int stdin_fd) {
             network_merge_config(&p->defaults, cpv);
     }
 
+    if (config_feature_bool(srv, "server.graceful-restart-bg", 0))
+        srv->srvconf.systemd_socket_activation = 1;
+
     int rc = 0;
     do {
 
@@ -878,8 +876,7 @@ int network_init(server *srv, int stdin_fd) {
                         != srv->srv_sockets_inherited.ptr[i]->sidx)
                         continue;
                     srv->srv_sockets_inherited.ptr[i]->sidx = 0;
-                srv_socket = calloc(1, sizeof(server_socket));
-                force_assert(NULL != srv_socket);
+                srv_socket = ck_calloc(1, sizeof(server_socket));
                 memcpy(srv_socket, srv->srv_sockets_inherited.ptr[i],
                        sizeof(server_socket));
                 srv_socket->is_ssl = p->defaults.ssl_enabled;

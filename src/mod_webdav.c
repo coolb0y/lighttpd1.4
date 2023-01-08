@@ -303,6 +303,7 @@ PHYSICALPATH_FUNC(mod_webdav_physical_handler);
 SUBREQUEST_FUNC(mod_webdav_subrequest_handler);
 REQUEST_FUNC(mod_webdav_handle_reset);
 
+__attribute_cold__
 int mod_webdav_plugin_init(plugin *p);
 int mod_webdav_plugin_init(plugin *p) {
     p->version           = LIGHTTPD_VERSION_ID;
@@ -402,7 +403,7 @@ typedef struct {
 
 
 INIT_FUNC(mod_webdav_init) {
-    return calloc(1, sizeof(plugin_data));
+    return ck_calloc(1, sizeof(plugin_data));
 }
 
 
@@ -721,7 +722,6 @@ typedef struct {
 typedef struct {
     webdav_property_name *ptr;
     int used;
-    int size;
 } webdav_property_names;
 
 /*
@@ -1458,7 +1458,7 @@ SERVER_FUNC(mod_webdav_worker_init)
               case 0: /* webdav.sqlite-db-name */
                 if (!buffer_is_blank(cpv->v.b)) {
                     const char * const dbname = cpv->v.b->ptr;
-                    cpv->v.v = calloc(1, sizeof(sql_config));
+                    cpv->v.v = ck_calloc(1, sizeof(sql_config));
                     cpv->vtype = T_CONFIG_LOCAL;
                     if (!mod_webdav_sqlite3_prep(cpv->v.v, dbname, srv->errh))
                         return HANDLER_ERROR;
@@ -2429,6 +2429,8 @@ static int
 webdav_parse_Depth (const request_st * const r)
 {
     /* Depth = "Depth" ":" ("0" | "1" | "infinity") */
+    /* check first char only;
+     * ignore MS-WDVSE "noroot" extensions "1,noroot" and "infinity,noroot" */
     const buffer * const h =
       http_header_request_get(r, HTTP_HEADER_OTHER, CONST_STR_LEN("Depth"));
     if (NULL != h) {
@@ -3921,7 +3923,6 @@ webdav_parse_chunkqueue (request_st * const r,
 struct webdav_lock_token_submitted_st {
   buffer *tokens;
   int used;
-  int size;
   const buffer *authn_user;
   buffer *b;
   request_st *r;
@@ -4002,7 +4003,6 @@ webdav_has_lock (request_st * const r,
     cbdata.r = r;
     cbdata.tokens = NULL;
     cbdata.used  = 0;
-    cbdata.size  = 0;
     cbdata.nlocks = 0;
     cbdata.slocks = 0;
     cbdata.smatch = 0;
@@ -4098,16 +4098,14 @@ webdav_has_lock (request_st * const r,
                  *   ; No linear whitespace (LWS) allowed in Coded-URL
                  *   ; absolute-URI defined in RFC 3986, Section 4.3
                  */
-                if (cbdata.size == cbdata.used) {
-                    if (cbdata.size == 16) { /* arbitrary limit */
+                if (!(cbdata.used & (16-1))) {
+                    if (cbdata.used == 16) { /* arbitrary limit */
                         http_status_set_error(r, 400); /* Bad Request */
                         chunk_buffer_release(cbdata.b);
                         return 0;
                     }
-                    cbdata.size = 16;
-                    cbdata.tokens =
-                      realloc(cbdata.tokens, sizeof(*(cbdata.tokens)) * 16);
-                    force_assert(cbdata.tokens); /*(see above limit)*/
+                    ck_realloc_u32((void **)&cbdata.tokens, (uint32_t)cbdata.used,
+                                   16, sizeof(*cbdata.tokens));
                 }
                 cbdata.tokens[cbdata.used].ptr = p+1;
 
@@ -4248,7 +4246,6 @@ mod_webdav_propfind (request_st * const r, const plugin_config * const pconf)
 
     pb.proplist.ptr  = NULL;
     pb.proplist.used = 0;
-    pb.proplist.size = 0;
 
   #ifdef USE_PROPPATCH
     xmlDocPtr xml = NULL;
@@ -4289,8 +4286,8 @@ mod_webdav_propfind (request_st * const r, const plugin_config * const pconf)
                 }
 
                 /* add property to requested list */
-                if (pb.proplist.size == pb.proplist.used) {
-                    if (pb.proplist.size == 32) {
+                if (!(pb.proplist.used & (32-1))) {
+                    if (pb.proplist.used == 32) {
                         /* arbitrarily chosen limit of 32 */
                         log_error(r->conf.errh, __FILE__, __LINE__,
                                   "too many properties in request (> 32)");
@@ -4299,10 +4296,9 @@ mod_webdav_propfind (request_st * const r, const plugin_config * const pconf)
                         xmlFreeDoc(xml);
                         return HANDLER_FINISHED;
                     }
-                    pb.proplist.size = 32;
-                    pb.proplist.ptr =
-                      realloc(pb.proplist.ptr, sizeof(*(pb.proplist.ptr)) * 32);
-                    force_assert(pb.proplist.ptr); /*(see above limit)*/
+                    ck_realloc_u32((void **)&pb.proplist.ptr,
+                                   (uint32_t)pb.proplist.used,
+                                   32, sizeof(*pb.proplist.ptr));
                 }
 
                 const size_t namelen = strlen((char *)prop->name);
@@ -4601,6 +4597,12 @@ mod_webdav_put_0 (request_st * const r, const plugin_config * const pconf)
 static handler_t
 mod_webdav_put_prep (request_st * const r, const plugin_config * const pconf)
 {
+    if (buffer_has_pathsep_suffix(&r->physical.path)) {
+        /* disallow PUT on a collection (path ends in '/') */
+        http_status_set_error(r, 400); /* Bad Request */
+        return HANDLER_FINISHED;
+    }
+
     if (light_btst(r->rqst_htags, HTTP_HEADER_CONTENT_RANGE)) {
         if (pconf->opts & (MOD_WEBDAV_UNSAFE_PARTIAL_PUT_COMPAT
                           |MOD_WEBDAV_CPYTMP_PARTIAL_PUT))
@@ -4612,13 +4614,6 @@ mod_webdav_put_prep (request_st * const r, const plugin_config * const pconf)
          *   payload is likely to be partial content that has been mistakenly
          *   PUT as a full representation.
          */
-        http_status_set_error(r, 400); /* Bad Request */
-        return HANDLER_FINISHED;
-    }
-
-    const uint32_t used = r->physical.path.used;
-    char *slash = r->physical.path.ptr + used - 2;
-    if (*slash == '/') { /* disallow PUT on a collection (path ends in '/') */
         http_status_set_error(r, 400); /* Bad Request */
         return HANDLER_FINISHED;
     }
@@ -4635,7 +4630,7 @@ mod_webdav_put_prep (request_st * const r, const plugin_config * const pconf)
     int fd;
     size_t len = buffer_clen(&r->physical.path);
   #if (defined(__linux__) || defined(__CYGWIN__)) && defined(O_TMPFILE)
-    slash = memrchr(r->physical.path.ptr, '/', len);
+    char *slash = memrchr(r->physical.path.ptr, '/', len);
     if (slash == r->physical.path.ptr) slash = NULL;
     if (slash) *slash = '\0';
     fd = fdevent_open_cloexec(r->physical.path.ptr, 1,
@@ -4831,6 +4826,9 @@ mod_webdav_put_range (request_st * const r, const buffer * const h,
         } while (wr > 0 && (cqlen -= wr));
         /*(ignore if c->file.fd truncated (wr == 0 && cqlen != 0); fail below)*/
     }
+    off_t wrote = chunkqueue_length(cq) - cqlen;
+    offset += wrote;
+    chunkqueue_mark_written(cq, wrote);
     if (0 != cqlen) /* fallback, retry if copy_file_range() did not finish */
   #endif
   {
@@ -6078,13 +6076,9 @@ PHYSICALPATH_FUNC(mod_webdav_physical_handler)
       mod_webdav_subrequest_handler(r, p_d); /*p->handle_subrequest()*/
     if (rc == HANDLER_FINISHED || rc == HANDLER_ERROR)
         r->plugin_ctx[((plugin_data *)p_d)->id] = NULL;
-    else {  /* e.g. HANDLER_WAIT_FOR_RD */
-        plugin_config * const save_pconf =
-          (plugin_config *)malloc(sizeof(pconf));
-        force_assert(save_pconf);
-        memcpy(save_pconf, &pconf, sizeof(pconf));
-        r->plugin_ctx[((plugin_data *)p_d)->id] = save_pconf;
-    }
+    else  /* e.g. HANDLER_WAIT_FOR_EVENT */
+        r->plugin_ctx[((plugin_data *)p_d)->id] = /* save pconf */
+          memcpy(ck_malloc(sizeof(pconf)), &pconf, sizeof(pconf));
     return rc;
 }
 

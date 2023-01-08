@@ -13,9 +13,7 @@ __attribute_returns_nonnull__
 static fdnode *
 fdnode_init (void)
 {
-    fdnode * const restrict fdn = calloc(1, sizeof(fdnode));
-    force_assert(NULL != fdn);
-    return fdn;
+    return ck_calloc(1, sizeof(fdnode));
 }
 
 static void
@@ -33,9 +31,6 @@ fdevent_register (fdevents *ev, int fd, fdevent_handler handler, void *ctx)
     fdn->ctx     = ctx;
     fdn->events  = 0;
     fdn->fde_ndx = -1;
-  #ifdef FDEVENT_USE_LIBEV
-    fdn->handler_ctx = NULL;
-  #endif
     return fdn;
 }
 

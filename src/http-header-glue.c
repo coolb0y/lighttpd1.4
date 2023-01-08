@@ -239,6 +239,8 @@ int http_response_handle_cachable(request_st * const r, const buffer *lmod, cons
 
 
 void http_response_body_clear (request_st * const r, int preserve_length) {
+    r->resp_body_finished = 0;
+    r->resp_body_started = 0;
     r->resp_send_chunked = 0;
     r->resp_body_scratchpad = -1;
     if (light_btst(r->resp_htags, HTTP_HEADER_TRANSFER_ENCODING)) {
@@ -287,8 +289,6 @@ static void http_response_header_clear (request_st * const r) {
 void http_response_reset (request_st * const r) {
     r->http_status = 0;
     r->con->is_writable = 1;
-    r->resp_body_finished = 0;
-    r->resp_body_started = 0;
     r->handler_module = NULL;
     if (r->physical.path.ptr) { /*(skip for mod_fastcgi authorizer)*/
         buffer_clear(&r->physical.doc_root);
@@ -1006,8 +1006,7 @@ static int http_response_process_headers(request_st * const restrict r, http_res
             }
             /*(assumes "Transfer-Encoding: chunked"; does not verify)*/
             r->resp_decode_chunked = 1;
-            r->gw_dechunk = calloc(1, sizeof(response_dechunk));
-            force_assert(r->gw_dechunk);
+            r->gw_dechunk = ck_calloc(1, sizeof(response_dechunk));
             continue;
           case HTTP_HEADER_HTTP2_SETTINGS:
             /* RFC7540 3.2.1

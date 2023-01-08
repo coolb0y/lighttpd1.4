@@ -93,8 +93,7 @@ SETDEFAULTS_FUNC(mod_scgi_set_defaults) {
         for (; -1 != cpv->k_id; ++cpv) {
             switch (cpv->k_id) {
               case 0:{/* scgi.server */
-                gw_plugin_config *gw = calloc(1, sizeof(gw_plugin_config));
-                force_assert(gw);
+                gw_plugin_config *gw = ck_calloc(1, sizeof(gw_plugin_config));
                 if (!gw_set_defaults_backend(srv, p, cpv->v.a, gw, 1,
                                              cpk[cpv->k_id].k)) {
                     gw_plugin_config_free(gw);
@@ -282,7 +281,7 @@ static handler_t scgi_check_extension_2(request_st * const r, void *p_d) {
 }
 
 
-
+__attribute_cold__
 int mod_scgi_plugin_init(plugin *p);
 int mod_scgi_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

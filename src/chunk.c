@@ -83,7 +83,7 @@ void chunkqueue_set_tempdirs_default_reset (void)
     chunkqueue_default_tempdirs = NULL;
     chunkqueue_default_tempfile_size = DEFAULT_TEMPFILE_SIZE;
 
-  #ifdef HAVE_MMAP /*(abuse this func to initialize statics as startup)*/
+  #ifdef HAVE_MMAP /*(extend this func to initialize statics at startup)*/
     if (0 == chunk_pagemask)
         chunk_pagemask = mmap_pagemask();
     chunk_mmap_flags = MAP_SHARED;
@@ -92,13 +92,13 @@ void chunkqueue_set_tempdirs_default_reset (void)
 
 chunkqueue *chunkqueue_init(chunkqueue *cq) {
 	/* (if caller passes non-NULL cq, it must be 0-init) */
-	if (NULL == cq) {
-		cq = calloc(1, sizeof(*cq));
-		force_assert(NULL != cq);
-	}
+	if (NULL == cq)
+		cq = ck_calloc(1, sizeof(*cq));
 
+      #if 0 /*(zeroed by calloc())*/
 	cq->first = NULL;
 	cq->last = NULL;
+      #endif
 
 	cq->tempdirs              = chunkqueue_default_tempdirs;
 	cq->upload_temp_file_size = chunkqueue_default_tempfile_size;
@@ -108,8 +108,7 @@ chunkqueue *chunkqueue_init(chunkqueue *cq) {
 
 __attribute_returns_nonnull__
 static chunk *chunk_init(void) {
-	chunk * const restrict c = calloc(1, sizeof(*c));
-	force_assert(NULL != c);
+	chunk * const restrict c = ck_calloc(1, sizeof(*c));
 
       #if 0 /*(zeroed by calloc())*/
 	c->type = MEM_CHUNK;
@@ -138,8 +137,7 @@ static chunk *chunk_init_sz(size_t sz) {
 __attribute_malloc__
 __attribute_returns_nonnull__
 static void * chunk_file_view_init (void) {
-    chunk_file_view * const restrict cfv = calloc(1, sizeof(*cfv));
-    force_assert(NULL != cfv);
+    chunk_file_view * const restrict cfv = ck_calloc(1, sizeof(*cfv));
     cfv->mptr = MAP_FAILED;
   #if 0 /*(zeroed by calloc())*/
     cfv->mlen = 0;
@@ -634,7 +632,7 @@ char * chunkqueue_get_memory(chunkqueue * const restrict cq, size_t * const rest
 void chunkqueue_use_memory(chunkqueue * const restrict cq, chunk *ckpt, size_t len) {
     buffer *b = cq->last->mem;
 
-    if (len > 0) {
+    if (__builtin_expect( (len > 0), 1)) {
         buffer_commit(b, len);
         cq->bytes_in += len;
         if (cq->last == ckpt || NULL == ckpt || MEM_CHUNK != ckpt->type
@@ -1351,10 +1349,8 @@ static int chunk_open_file_chunk(chunk * const restrict c, log_error_st * const 
 		return -1;
 	}
 
-	const off_t offset = c->offset;
-	const off_t len = c->file.length - c->offset;
-	force_assert(offset >= 0 && len >= 0);
-	if (offset > st.st_size - len) {
+	/*(ok if file grew, e.g. a log file)*/
+	if (c->file.length > st.st_size) {
 		log_error(errh, __FILE__, __LINE__, "file shrunk: %s", c->mem->ptr);
 		return -1;
 	}

@@ -240,12 +240,9 @@ typedef struct {
 } handler_ctx;
 
 static handler_ctx *handler_ctx_init() {
-	handler_ctx *hctx;
-
-	hctx = calloc(1, sizeof(*hctx));
+	handler_ctx * const hctx = ck_calloc(1, sizeof(*hctx));
 	chunkqueue_init(&hctx->in_queue);
 	hctx->cache_fd = -1;
-
 	return hctx;
 }
 
@@ -266,7 +263,7 @@ static void handler_ctx_free(handler_ctx *hctx) {
 }
 
 INIT_FUNC(mod_deflate_init) {
-    plugin_data * const p = calloc(1, sizeof(plugin_data));
+    plugin_data * const p = ck_calloc(1, sizeof(plugin_data));
   #ifdef USE_ZSTD
     buffer_string_prepare_copy(&p->tmp_buf, ZSTD_CStreamOutSize());
   #else
@@ -336,8 +333,7 @@ static void mod_deflate_cache_file_open (handler_ctx * const hctx, const buffer 
      * file at same time if requested at same time, but this is unlikely
      * and resolves itself by atomic rename into place when done */
     const uint32_t fnlen = buffer_clen(fn);
-    hctx->cache_fn = malloc(fnlen+1+LI_ITOSTRING_LENGTH+1);
-    force_assert(hctx->cache_fn);
+    hctx->cache_fn = ck_malloc(fnlen+1+LI_ITOSTRING_LENGTH+1);
     memcpy(hctx->cache_fn, fn->ptr, fnlen);
     hctx->cache_fn[fnlen] = '.';
     const size_t ilen =
@@ -433,8 +429,7 @@ static void mod_deflate_patch_config(request_st * const r, plugin_data * const p
 }
 
 static encparms * mod_deflate_parse_params(const array * const a, log_error_st * const errh) {
-    encparms * params = calloc(1, sizeof(encparms));
-    force_assert(params);
+    encparms * const params = ck_calloc(1, sizeof(encparms));
 
     /* set defaults */
   #ifdef USE_ZLIB
@@ -613,8 +608,7 @@ static encparms * mod_deflate_parse_params(const array * const a, log_error_st *
 
 static uint16_t * mod_deflate_encodings_to_flags(const array *encodings) {
     if (encodings->used) {
-        uint16_t * const x = calloc(encodings->used+1, sizeof(short));
-        force_assert(x);
+        uint16_t * const x = ck_calloc(encodings->used+1, sizeof(short));
         int i = 0;
         for (uint32_t j = 0; j < encodings->used; ++j) {
           #if defined(USE_ZLIB) || defined(USE_BZ2LIB) || defined(USE_BROTLI) \
@@ -651,8 +645,7 @@ static uint16_t * mod_deflate_encodings_to_flags(const array *encodings) {
     }
     else {
         /* default encodings */
-        uint16_t * const x = calloc(4+1, sizeof(short));
-        force_assert(x);
+        uint16_t * const x = ck_calloc(4+1, sizeof(short));
         int i = 0;
       #ifdef USE_ZSTD
         x[i++] = HTTP_ACCEPT_ENCODING_ZSTD;
@@ -904,7 +897,7 @@ static int stream_deflate_init(handler_ctx *hctx) {
 				 Z_DEFLATED,
 				 (hctx->compression_type == HTTP_ACCEPT_ENCODING_GZIP)
 				  ? (wbits | 16) /*(0x10 flags gzip header, trailer)*/
-				  : -wbits,      /*(negate to suppress zlib header)*/
+				  :  wbits,
 				 params ? params->gzip.memLevel : 8,/*default memLevel*/
 				 params ? params->gzip.strategy : Z_DEFAULT_STRATEGY)) {
 		return -1;
@@ -1470,7 +1463,7 @@ static int mod_deflate_using_libdeflate_sm (handler_ctx * const hctx, const plug
     size_t sz = buffer_string_space(addrb)+1;
     sz = (hctx->compression_type == HTTP_ACCEPT_ENCODING_GZIP)
       ? libdeflate_gzip_compress(compressor, in, in_nbytes, addrb->ptr, sz)
-      : libdeflate_deflate_compress(compressor, in, in_nbytes, addrb->ptr, sz);
+      : libdeflate_zlib_compress(compressor, in, in_nbytes, addrb->ptr, sz);
     libdeflate_free_compressor(compressor);
 
     if (0 == sz) {
@@ -1509,8 +1502,8 @@ static off_t mod_deflate_using_libdeflate_setjmp_cb (void *dst, const void *src,
     return (off_t)((hctx->compression_type == HTTP_ACCEPT_ENCODING_GZIP)
       ? libdeflate_gzip_compress(params->compressor, in, (size_t)len,
                                  params->out, params->outsz)
-      : libdeflate_deflate_compress(params->compressor, in, (size_t)len,
-                                    params->out, params->outsz));
+      : libdeflate_zlib_compress(params->compressor, in, (size_t)len,
+                                 params->out, params->outsz));
 }
 
 
@@ -1532,7 +1525,7 @@ static int mod_deflate_using_libdeflate (handler_ctx * const hctx, const plugin_
     }
 
     const size_t sz =
-      libdeflate_deflate_compress_bound(NULL, (size_t)hctx->bytes_in);
+      libdeflate_zlib_compress_bound(NULL, (size_t)hctx->bytes_in);
     /*(XXX: consider trying posix_fallocate() first,
      * with fallback to ftrunctate() if EOPNOTSUPP)*/
     if (0 != ftruncate(fd, (off_t)sz)) {
@@ -2008,6 +2001,7 @@ REQUEST_FUNC(mod_deflate_handle_response_start) {
 	if (HTTP_METHOD_HEAD == r->http_method) {
 		/* ensure that uncompressed Content-Length is not sent in HEAD response */
 		http_response_body_clear(r, 0);
+		r->resp_body_finished = 1;
 		return HANDLER_GO_ON;
 	}
 
@@ -2021,6 +2015,7 @@ REQUEST_FUNC(mod_deflate_handle_response_start) {
 	 * must not be chunkqueue temporary file
 	 * must be whole file, not partial content
 	 * must not be HTTP status 206 Partial Content
+	 * must not have Cache-Control 'private' or 'no-store'
 	 * Note: small files (< 32k (see http_chunk.c)) will have been read into
 	 *       memory (if streaming HTTP/1.1 chunked response) and will end up
 	 *       getting stream-compressed rather than cached on disk as compressed
@@ -2035,7 +2030,14 @@ REQUEST_FUNC(mod_deflate_handle_response_start) {
 	    && r->write_queue.first->type == FILE_CHUNK
 	    && r->write_queue.first->offset == 0
 	    && !r->write_queue.first->file.is_temp
-	    && r->http_status != 206) {
+	    && r->http_status != 206
+	    && (!(vbro = http_header_response_get(r, HTTP_HEADER_CACHE_CONTROL,
+	                                          CONST_STR_LEN("Cache-Control")))
+	        || (!http_header_str_contains_token(BUF_PTR_LEN(vbro),
+	                                            CONST_STR_LEN("private"))
+	            && !http_header_str_contains_token(BUF_PTR_LEN(vbro),
+	                                               CONST_STR_LEN("no-store"))))
+	   ) {
 		tb = mod_deflate_cache_file_name(r, p->conf.cache_dir, vb);
 		/*(checked earlier and skipped if Transfer-Encoding had been set)*/
 		stat_cache_entry *sce = stat_cache_get_entry_open(tb, 1);
@@ -2180,6 +2182,8 @@ static handler_t mod_deflate_cleanup(request_st * const r, void *p_d) {
 	return HANDLER_GO_ON;
 }
 
+
+__attribute_cold__
 int mod_deflate_plugin_init(plugin *p);
 int mod_deflate_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

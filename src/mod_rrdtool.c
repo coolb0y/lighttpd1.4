@@ -43,7 +43,7 @@ typedef struct {
 } plugin_data;
 
 INIT_FUNC(mod_rrd_init) {
-    return calloc(1, sizeof(plugin_data));
+    return ck_calloc(1, sizeof(plugin_data));
 }
 
 static void mod_rrd_free_config(plugin_data * const p) {
@@ -186,8 +186,7 @@ SETDEFAULTS_FUNC(mod_rrd_set_defaults) {
             switch (cpv->k_id) {
               case 0: /* rrdtool.db-name */
                 if (!buffer_is_blank(cpv->v.b)) {
-                    rrd_config *rrd = calloc(1, sizeof(rrd_config));
-                    force_assert(rrd);
+                    rrd_config *rrd = ck_calloc(1, sizeof(rrd_config));
                     rrd->path_rrd = cpv->v.b;
                     cpv->v.v = rrd;
                     cpv->vtype = T_CONFIG_LOCAL;
@@ -431,6 +430,8 @@ REQUESTDONE_FUNC(mod_rrd_account) {
     return HANDLER_GO_ON;
 }
 
+
+__attribute_cold__
 int mod_rrdtool_plugin_init(plugin *p);
 int mod_rrdtool_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

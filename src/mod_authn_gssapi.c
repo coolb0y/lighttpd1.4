@@ -56,7 +56,7 @@ INIT_FUNC(mod_authn_gssapi_init) {
       { "gssapi", mod_authn_gssapi_check, NULL };
     static http_auth_backend_t http_auth_backend_gssapi =
       { "gssapi", mod_authn_gssapi_basic, NULL, NULL };
-    plugin_data *p = calloc(1, sizeof(*p));
+    plugin_data *p = ck_calloc(1, sizeof(*p));
 
     /* register http_auth_scheme_gssapi and http_auth_backend_gssapi */
     http_auth_scheme_gssapi.p_d = p;
@@ -794,6 +794,8 @@ REQUEST_FUNC(mod_authn_gssapi_handle_reset) {
     return HANDLER_GO_ON;
 }
 
+
+__attribute_cold__
 int mod_authn_gssapi_plugin_init(plugin *p);
 int mod_authn_gssapi_plugin_init(plugin *p) {
     p->version     = LIGHTTPD_VERSION_ID;

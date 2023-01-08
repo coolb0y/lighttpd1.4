@@ -123,12 +123,7 @@ typedef struct {
     /*(used only during startup; not patched)*/
     unsigned char ssl_enabled; /* only interesting for setting up listening sockets. don't use at runtime */
     unsigned char ssl_honor_cipher_order; /* determine SSL cipher in server-preferred order, not client-order */
-    unsigned char ssl_empty_fragments; /* whether to not set SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS */
-    unsigned char ssl_use_sslv2;
-    unsigned char ssl_use_sslv3;
     const buffer *ssl_cipher_list;
-    const buffer *ssl_dh_file;
-    const buffer *ssl_ec_curve;
     array *ssl_conf_cmd;
 
     /*(copied from plugin_data for socket ssl_ctx config)*/
@@ -140,7 +135,6 @@ typedef struct {
     unsigned char ssl_verifyclient_enforce;
     unsigned char ssl_verifyclient_depth;
     unsigned char ssl_read_ahead;
-    unsigned char ssl_disable_client_renegotiation;
 } plugin_config_socket; /*(used at startup during configuration)*/
 
 typedef struct {
@@ -156,7 +150,6 @@ typedef struct {
     unsigned char ssl_verifyclient_export_cert;
     unsigned char ssl_read_ahead;
     unsigned char ssl_log_noise;
-    unsigned char ssl_disable_client_renegotiation;
     const buffer *ssl_verifyclient_username;
     const buffer *ssl_acme_tls_1;
 } plugin_config;
@@ -193,9 +186,7 @@ typedef struct {
 static handler_ctx *
 handler_ctx_init (void)
 {
-    handler_ctx *hctx = calloc(1, sizeof(*hctx));
-    force_assert(hctx);
-    return hctx;
+    return ck_calloc(1, sizeof(handler_ctx));
 }
 
 
@@ -506,7 +497,7 @@ ssl_tlsext_status_cb(SSL *ssl, void *arg)
 
 INIT_FUNC(mod_openssl_init)
 {
-    plugin_data_singleton = (plugin_data *)calloc(1, sizeof(plugin_data));
+    plugin_data_singleton = (plugin_data *)ck_calloc(1, sizeof(plugin_data));
     return plugin_data_singleton;
 }
 
@@ -536,9 +527,7 @@ static int mod_openssl_init_once_openssl (server *srv)
         return 0;
     }
 
-    local_send_buffer = malloc(LOCAL_SEND_BUFSIZE);
-    force_assert(NULL != local_send_buffer);
-
+    local_send_buffer = ck_malloc(LOCAL_SEND_BUFSIZE);
     return 1;
 }
 
@@ -667,6 +656,9 @@ PEM_ASN1_read_bio_secmem(d2i_of_void *d2i, const char *name, BIO *bp, void **x,
     if (ret == NULL)
         PEMerr(PEM_F_PEM_ASN1_READ_BIO, ERR_R_ASN1_LIB);
   #endif
+    /* boringssl provides OPENSSL_secure_clear_free() in commit
+     * 8a1542fc41b43bdcd67cd341c1d332d2e05e2340 (not yet in a release)
+     * (note: boringssl already calls OPENSSL_cleanse() in OPENSSL_free()) */
   #if OPENSSL_VERSION_NUMBER >= 0x10101000L \
    && !defined(BORINGSSL_API_VERSION) \
    && !defined(LIBRESSL_VERSION_NUMBER)
@@ -769,8 +761,7 @@ mod_openssl_load_cacerts (const buffer *ssl_ca_file, log_error_st *errh)
         return NULL;
     }
 
-    plugin_cacerts *cacerts = malloc(sizeof(plugin_cacerts));
-    force_assert(cacerts);
+    plugin_cacerts *cacerts = ck_malloc(sizeof(plugin_cacerts));
 
     /* (would be more efficient to walk the X509_STORE and build the list,
      *  but this works for now and matches how ssl.ca-dn-file is handled) */
@@ -869,7 +860,7 @@ mod_openssl_merge_config_cpv (plugin_config * const pconf, const config_plugin_v
         pconf->ssl_read_ahead = (0 != cpv->v.u);
         break;
       case 6: /* ssl.disable-client-renegotiation */
-        pconf->ssl_disable_client_renegotiation = (0 != cpv->v.u);
+        /*(ignored; unsafe renegotiation disabled by default)*/
         break;
       case 7: /* ssl.verifyclient.activate */
         pconf->ssl_verifyclient = (0 != cpv->v.u);
@@ -1277,7 +1268,7 @@ network_ssl_servername_callback (SSL *ssl, int *al, void *srv)
 
 #if OPENSSL_VERSION_NUMBER < 0x10101000L \
  || defined(BORINGSSL_API_VERSION) \
- || defined(LIBRESSL_VERSION_NUMBER)
+ ||(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3060000fL)
 static unix_time64_t
 mod_openssl_asn1_time_to_posix (const ASN1_TIME *asn1time);
 #endif
@@ -1296,7 +1287,7 @@ mod_openssl_cert_is_active (const X509 *crt)
     const ASN1_TIME *notAfter  = X509_get0_notAfter(crt);
   #if OPENSSL_VERSION_NUMBER < 0x10101000L \
    || defined(BORINGSSL_API_VERSION) \
-   || defined(LIBRESSL_VERSION_NUMBER)
+   ||(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3060000fL)
     const unix_time64_t before = mod_openssl_asn1_time_to_posix(notBefore);
     const unix_time64_t after  = mod_openssl_asn1_time_to_posix(notAfter);
     const unix_time64_t now = log_epoch_secs;
@@ -1328,12 +1319,15 @@ mod_openssl_load_pem_file (const char *file, log_error_st *errh, STACK_OF(X509) 
         return NULL;
     }
 
-    X509 *x = PEM_read_bio_X509_AUX_secmem(in, NULL, NULL, NULL);
+    int is_pem = (NULL != strstr(data, "-----"));
+    X509 *x = is_pem
+      ? PEM_read_bio_X509_AUX_secmem(in, NULL, NULL, NULL)
+      : d2i_X509_bio(in, NULL);
     if (NULL == x) {
         log_error(errh, __FILE__, __LINE__,
           "SSL: couldn't read X509 certificate from '%s'", file);
     }
-    else if (!mod_openssl_load_X509_sk(file, errh, chain, in)) {
+    else if (is_pem && !mod_openssl_load_X509_sk(file, errh, chain, in)) {
         X509_free(x);
         x = NULL;
     }
@@ -1358,7 +1352,9 @@ mod_openssl_evp_pkey_load_pem_file (const char *file, log_error_st *errh)
     EVP_PKEY *x = NULL;
     BIO *in = BIO_new_mem_buf(data, (int)dlen);
     if (NULL != in) {
-        x = PEM_read_bio_PrivateKey(in, NULL, NULL, NULL);
+        x = (NULL != strstr(data, "-----"))
+          ? PEM_read_bio_PrivateKey(in, NULL, NULL, NULL)
+          : d2i_PrivateKey_bio(in, NULL);
         BIO_free(in);
     }
     if (dlen) ck_memzero(data, dlen);
@@ -1712,8 +1708,7 @@ network_openssl_load_pemfile (server *srv, const buffer *pemfile, const buffer *
         return NULL;
     }
 
-    plugin_cert *pc = malloc(sizeof(plugin_cert));
-    force_assert(pc);
+    plugin_cert *pc = ck_malloc(sizeof(plugin_cert));
     pc->ssl_pemfile_pkey = ssl_pemfile_pkey;
     pc->ssl_pemfile_x509 = ssl_pemfile_x509;
     pc->ssl_pemfile_chain= ssl_pemfile_chain;
@@ -2087,10 +2082,92 @@ static DH *get_dh2048(void)
     }
     return dh;
 }
-#endif
+#endif /* !OPENSSL_NO_DH */
 #endif /* OPENSSL_VERSION_NUMBER < 0x30000000L */
 
 
+static int
+mod_openssl_ssl_conf_dhparameters(server *srv, plugin_config_socket *s, const buffer *dhparameters)
+{
+  #ifndef OPENSSL_NO_DH
+   #if OPENSSL_VERSION_NUMBER < 0x30000000L
+    DH *dh;
+    /* Support for Diffie-Hellman key exchange */
+    if (dhparameters) {
+        /* DH parameters from file */
+        BIO *bio;
+        bio = BIO_new_file((char *) dhparameters->ptr, "r");
+        if (bio == NULL) {
+            log_error(srv->errh, __FILE__, __LINE__,
+              "SSL: Unable to open file %s", dhparameters->ptr);
+            return 0;
+        }
+        dh = PEM_read_bio_DHparams(bio, NULL, NULL, NULL);
+        BIO_free(bio);
+        if (dh == NULL) {
+            log_error(srv->errh, __FILE__, __LINE__,
+              "SSL: PEM_read_bio_DHparams failed %s", dhparameters->ptr);
+            return 0;
+        }
+        SSL_CTX_set_tmp_dh(s->ssl_ctx, dh);
+        DH_free(dh);
+    }
+    else {
+        dh = get_dh2048();
+        if (dh == NULL) {
+            log_error(srv->errh, __FILE__, __LINE__,
+              "SSL: get_dh2048() failed");
+            return 0;
+        }
+        SSL_CTX_set_tmp_dh(s->ssl_ctx, dh);
+        DH_free(dh);
+    }
+   #else
+    /* OSSL_STORE_open() available in openssl 1.1.1, but might
+     * not be present in alt TLS libs (libressl or boringssl) */
+    EVP_PKEY *dhpkey = NULL;
+    if (dhparameters) {
+        OSSL_STORE_CTX *ctx = NULL;
+        ctx = OSSL_STORE_open(dhparameters->ptr, NULL, NULL, NULL, NULL);
+        if (NULL != ctx) {
+            if (OSSL_STORE_expect(ctx, OSSL_STORE_INFO_PARAMS)) {
+                while (!OSSL_STORE_eof(ctx)) {
+                    OSSL_STORE_INFO *info = OSSL_STORE_load(ctx);
+                    if (info) {
+                        dhpkey = OSSL_STORE_INFO_get1_PARAMS(info);
+                        OSSL_STORE_INFO_free(info);
+                    }
+                    break;
+                }
+            }
+            OSSL_STORE_close(ctx);
+        }
+        if (!dhpkey || !EVP_PKEY_is_a(dhpkey, "DH")
+            || !SSL_CTX_set0_tmp_dh_pkey(s->ssl_ctx, dhpkey)) {
+            log_error(srv->errh, __FILE__, __LINE__,
+              "Unable to load DH params from %s", dhparameters->ptr);
+            EVP_PKEY_free(dhpkey);
+            dhpkey = NULL;
+        } /*(else dhpkey ownership transferred upon success)*/
+    }
+    if (NULL == dhpkey)
+        SSL_CTX_set_dh_auto(s->ssl_ctx, 1);
+   #endif
+    SSL_CTX_set_options(s->ssl_ctx, SSL_OP_SINGLE_DH_USE);
+  #else
+    if (dhparameters) {
+        log_error(srv->errh, __FILE__, __LINE__,
+          "SSL: openssl compiled without DH support, "
+          "can't load parameters from %s", dhparameters->ptr);
+    }
+  #endif
+
+    return 1;
+}
+
+
+#if defined(BORINGSSL_API_VERSION) \
+ || defined(LIBRESSL_VERSION_NUMBER)
 static int
 mod_openssl_ssl_conf_curves(server *srv, plugin_config_socket *s, const buffer *ssl_ec_curve)
 {
@@ -2152,6 +2229,7 @@ mod_openssl_ssl_conf_curves(server *srv, plugin_config_socket *s, const buffer *
 
     return 1;
 }
+#endif /* BORINGSSL_API_VERSION || LIBRESSL_VERSION_NUMBER */
 
 
 static int
@@ -2170,9 +2248,7 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
                         | SSL_OP_NO_COMPRESSION;
 
       #if OPENSSL_VERSION_NUMBER >= 0x10100000L
-        s->ssl_ctx = (!s->ssl_use_sslv2 && !s->ssl_use_sslv3)
-          ? SSL_CTX_new(TLS_server_method())
-          : SSL_CTX_new(SSLv23_server_method());
+        s->ssl_ctx = SSL_CTX_new(TLS_server_method());
       #else
         s->ssl_ctx = SSL_CTX_new(SSLv23_server_method());
       #endif
@@ -2183,8 +2259,10 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
         }
 
       #ifdef SSL_OP_NO_RENEGOTIATION /* openssl 1.1.0 */
-        if (s->ssl_disable_client_renegotiation)
-            ssloptions |= SSL_OP_NO_RENEGOTIATION;
+        ssloptions |= SSL_OP_NO_RENEGOTIATION;
+      #endif
+      #ifdef SSL_OP_ENABLE_KTLS /* openssl 3.0.0 */
+        ssloptions |= SSL_OP_ENABLE_KTLS;
       #endif
 
         /* completely useless identifier;
@@ -2206,21 +2284,10 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
                                            | SSL_SESS_CACHE_NO_AUTO_CLEAR
                                            | SSL_SESS_CACHE_NO_INTERNAL);
 
-        if (s->ssl_empty_fragments) {
-          #ifdef SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS
-            ssloptions &= ~SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS;
-          #else
-            ssloptions &= ~0x00000800L; /* hardcode constant */
-            log_error(srv->errh, __FILE__, __LINE__,
-              "WARNING: SSL: 'insert empty fragments' not supported by the "
-              "openssl version used to compile lighttpd with");
-          #endif
-        }
-
         SSL_CTX_set_options(s->ssl_ctx, ssloptions);
         SSL_CTX_set_info_callback(s->ssl_ctx, ssl_info_callback);
 
-        if (!s->ssl_use_sslv2 && 0 != SSL_OP_NO_SSLv2) {
+        if (0 != SSL_OP_NO_SSLv2) {
             /* disable SSLv2 */
             if ((SSL_OP_NO_SSLv2
                  & SSL_CTX_set_options(s->ssl_ctx, SSL_OP_NO_SSLv2))
@@ -2231,7 +2298,7 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
             }
         }
 
-        if (!s->ssl_use_sslv3 && 0 != SSL_OP_NO_SSLv3) {
+        if (0 != SSL_OP_NO_SSLv3) {
             /* disable SSLv3 */
             if ((SSL_OP_NO_SSLv3
                  & SSL_CTX_set_options(s->ssl_ctx, SSL_OP_NO_SSLv3))
@@ -2260,82 +2327,7 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
             SSL_CTX_set_options(s->ssl_ctx, SSL_OP_PRIORITIZE_CHACHA);
       #endif
 
-      #ifndef OPENSSL_NO_DH
-      {
-       #if OPENSSL_VERSION_NUMBER < 0x30000000L
-        DH *dh;
-        /* Support for Diffie-Hellman key exchange */
-        if (s->ssl_dh_file) {
-            /* DH parameters from file */
-            BIO *bio;
-            bio = BIO_new_file((char *) s->ssl_dh_file->ptr, "r");
-            if (bio == NULL) {
-                log_error(srv->errh, __FILE__, __LINE__,
-                  "SSL: Unable to open file %s", s->ssl_dh_file->ptr);
-                return -1;
-            }
-            dh = PEM_read_bio_DHparams(bio, NULL, NULL, NULL);
-            BIO_free(bio);
-            if (dh == NULL) {
-                log_error(srv->errh, __FILE__, __LINE__,
-                  "SSL: PEM_read_bio_DHparams failed %s", s->ssl_dh_file->ptr);
-                return -1;
-            }
-            SSL_CTX_set_tmp_dh(s->ssl_ctx,dh);
-            DH_free(dh);
-        }
-        else {
-            dh = get_dh2048();
-            if (dh == NULL) {
-                log_error(srv->errh, __FILE__, __LINE__,
-                  "SSL: get_dh2048() failed");
-                return -1;
-            }
-            SSL_CTX_set_tmp_dh(s->ssl_ctx,dh);
-            DH_free(dh);
-        }
-       #else
-        /* OSSL_STORE_open() available in openssl 1.1.1, but might
-         * not be present in alt TLS libs (libressl or boringssl) */
-        EVP_PKEY *dhpkey = NULL;
-        if (s->ssl_dh_file) {
-            OSSL_STORE_CTX *ctx = NULL;
-            ctx = OSSL_STORE_open(s->ssl_dh_file->ptr, NULL, NULL, NULL, NULL);
-            if (NULL != ctx) {
-                if (OSSL_STORE_expect(ctx, OSSL_STORE_INFO_PARAMS)) {
-                    while (!OSSL_STORE_eof(ctx)) {
-                        OSSL_STORE_INFO *info = OSSL_STORE_load(ctx);
-                        if (info) {
-                            dhpkey = OSSL_STORE_INFO_get1_PARAMS(info);
-                            OSSL_STORE_INFO_free(info);
-                        }
-                        break;
-                    }
-                }
-                OSSL_STORE_close(ctx);
-            }
-            if (!dhpkey || !EVP_PKEY_is_a(dhpkey, "DH")
-                || !SSL_CTX_set0_tmp_dh_pkey(s->ssl_ctx, dhpkey)) {
-                log_error(srv->errh, __FILE__, __LINE__,
-                  "Unable to load DH params from %s", s->ssl_dh_file->ptr);
-                EVP_PKEY_free(dhpkey);
-                dhpkey = NULL;
-            } /*(else dhpkey ownership transferred upon success)*/
-        }
-        if (NULL == dhpkey)
-            SSL_CTX_set_dh_auto(s->ssl_ctx, 1);
-       #endif
-        SSL_CTX_set_options(s->ssl_ctx,SSL_OP_SINGLE_DH_USE);
-      }
-      #else
-        if (s->ssl_dh_file) {
-            log_error(srv->errh, __FILE__, __LINE__,
-              "SSL: openssl compiled without DH support, "
-              "can't load parameters from %s", s->ssl_dh_file->ptr);
-        }
-      #endif
-
-        if (!mod_openssl_ssl_conf_curves(srv, s, s->ssl_ec_curve))
+        if (!mod_openssl_ssl_conf_dhparameters(srv, s, NULL))
             return -1;
 
       #ifdef TLSEXT_TYPE_session_ticket
@@ -2465,8 +2457,7 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
       #if OPENSSL_VERSION_NUMBER >= 0x10100000L \
        || defined(BORINGSSL_API_VERSION) \
        || defined(LIBRESSL_VERSION_NUMBER)
-        if (!s->ssl_use_sslv3 && !s->ssl_use_sslv2
-            && !SSL_CTX_set_min_proto_version(s->ssl_ctx, TLS1_2_VERSION))
+        if (!SSL_CTX_set_min_proto_version(s->ssl_ctx, TLS1_2_VERSION))
             return -1;
       #endif
 
@@ -2481,6 +2472,10 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
 }
 
 
+#define LIGHTTPD_DEFAULT_CIPHER_LIST \
+"EECDH+AESGCM:AES256+EECDH:CHACHA20:!SHA1:!SHA256:!SHA384"
+
+
 static int
 mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
 {
@@ -2491,30 +2486,12 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
      ,{ CONST_STR_LEN("ssl.cipher-list"),
         T_CONFIG_STRING,
         T_CONFIG_SCOPE_SOCKET }
-     ,{ CONST_STR_LEN("ssl.honor-cipher-order"),
-        T_CONFIG_BOOL,
-        T_CONFIG_SCOPE_SOCKET }
-     ,{ CONST_STR_LEN("ssl.dh-file"),
-        T_CONFIG_STRING,
-        T_CONFIG_SCOPE_SOCKET }
-     ,{ CONST_STR_LEN("ssl.ec-curve"),
-        T_CONFIG_STRING,
-        T_CONFIG_SCOPE_SOCKET }
      ,{ CONST_STR_LEN("ssl.openssl.ssl-conf-cmd"),
         T_CONFIG_ARRAY_KVSTRING,
         T_CONFIG_SCOPE_SOCKET }
      ,{ CONST_STR_LEN("ssl.pemfile"), /* included to process global scope */
         T_CONFIG_STRING,
         T_CONFIG_SCOPE_CONNECTION }
-     ,{ CONST_STR_LEN("ssl.empty-fragments"),
-        T_CONFIG_BOOL,
-        T_CONFIG_SCOPE_SOCKET }
-     ,{ CONST_STR_LEN("ssl.use-sslv2"),
-        T_CONFIG_BOOL,
-        T_CONFIG_SCOPE_SOCKET }
-     ,{ CONST_STR_LEN("ssl.use-sslv3"),
-        T_CONFIG_BOOL,
-        T_CONFIG_SCOPE_SOCKET }
      ,{ CONST_STR_LEN("ssl.stek-file"),
         T_CONFIG_STRING,
         T_CONFIG_SCOPE_SERVER }
@@ -2522,10 +2499,10 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
         T_CONFIG_UNSET,
         T_CONFIG_SCOPE_UNSET }
     };
-    static const buffer default_ssl_cipher_list = { CONST_STR_LEN("HIGH"), 0 };
+    static const buffer default_ssl_cipher_list =
+      { CONST_STR_LEN(LIGHTTPD_DEFAULT_CIPHER_LIST), 0 };
 
-    p->ssl_ctxs = calloc(srv->config_context->used, sizeof(plugin_ssl_ctx));
-    force_assert(p->ssl_ctxs);
+    p->ssl_ctxs = ck_calloc(srv->config_context->used, sizeof(plugin_ssl_ctx));
 
     int rc = HANDLER_GO_ON;
     plugin_data_base srvplug;
@@ -2536,7 +2513,6 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
 
     plugin_config_socket defaults;
     memset(&defaults, 0, sizeof(defaults));
-    defaults.ssl_honor_cipher_order = 1;
     defaults.ssl_cipher_list = &default_ssl_cipher_list;
 
     /* process and validate config directives for global and $SERVER["socket"]
@@ -2565,61 +2541,25 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
                 --count_not_engine;
                 break;
               case 1: /* ssl.cipher-list */
-                if (!buffer_is_blank(cpv->v.b))
+                if (!buffer_is_blank(cpv->v.b)) {
                     conf.ssl_cipher_list = cpv->v.b;
+                    /*(historical use might list non-PFS ciphers)*/
+                    conf.ssl_honor_cipher_order = 1;
+                    log_error(srv->errh, __FILE__, __LINE__,
+                      "%s is deprecated.  "
+                      "Please prefer lighttpd secure TLS defaults, or use "
+                      "ssl.openssl.ssl-conf-cmd \"CipherString\" to set custom "
+                      "cipher list.", cpk[cpv->k_id].k);
+                }
                 break;
-              case 2: /* ssl.honor-cipher-order */
-                conf.ssl_honor_cipher_order = (0 != cpv->v.u);
-                break;
-              case 3: /* ssl.dh-file */
-                if (!buffer_is_blank(cpv->v.b))
-                    conf.ssl_dh_file = cpv->v.b;
-                break;
-              case 4: /* ssl.ec-curve */
-                if (!buffer_is_blank(cpv->v.b))
-                    conf.ssl_ec_curve = cpv->v.b;
-                break;
-              case 5: /* ssl.openssl.ssl-conf-cmd */
+              case 2: /* ssl.openssl.ssl-conf-cmd */
                 *(const array **)&conf.ssl_conf_cmd = cpv->v.a;
                 break;
-              case 6: /* ssl.pemfile */
+              case 3: /* ssl.pemfile */
                 /* ignore here; included to process global scope when
                  * ssl.pemfile is set, but ssl.engine is not "enable" */
                 break;
-              case 7: /* ssl.empty-fragments */
-                conf.ssl_empty_fragments = (0 != cpv->v.u);
-                log_error(srv->errh, __FILE__, __LINE__, "SSL: "
-                  "ssl.empty-fragments is deprecated and will soon be "
-                  "removed.  It is disabled by default.");
-                if (conf.ssl_empty_fragments)
-                    log_error(srv->errh, __FILE__, __LINE__, "SSL: "
-                      "If needed, use: ssl.openssl.ssl-conf-cmd = "
-                      "(\"Options\" => \"EmptyFragments\")");
-                log_error(srv->errh, __FILE__, __LINE__, "SSL: "
-                  "ssl.empty-fragments is a "
-                  "counter-measure against a SSL 3.0/TLS 1.0 protocol "
-                  "vulnerability affecting CBC ciphers, which cannot be handled"
-                  " by some broken (Microsoft) SSL implementations.");
-                break;
-              case 8: /* ssl.use-sslv2 */
-                conf.ssl_use_sslv2 = (0 != cpv->v.u);
-                log_error(srv->errh, __FILE__, __LINE__, "SSL: "
-                  "ssl.use-sslv2 is deprecated and will soon be removed.  "
-                  "It is disabled by default.  "
-                  "Many modern TLS libraries no longer support SSLv2.");
-                break;
-              case 9: /* ssl.use-sslv3 */
-                conf.ssl_use_sslv3 = (0 != cpv->v.u);
-                log_error(srv->errh, __FILE__, __LINE__, "SSL: "
-                  "ssl.use-sslv3 is deprecated and will soon be removed.  "
-                  "It is disabled by default.  "
-                  "Many modern TLS libraries no longer support SSLv3.");
-                if (conf.ssl_use_sslv3)
-                    log_error(srv->errh, __FILE__, __LINE__, "SSL: "
-                      "If needed, use: ssl.openssl.ssl-conf-cmd = "
-                      "(\"MinProtocol\" => \"SSLv3\")");
-                break;
-              case 10:/* ssl.stek-file */
+              case 4: /* ssl.stek-file */
                 if (!buffer_is_blank(cpv->v.b))
                     p->ssl_stek_file = cpv->v.b->ptr;
                 break;
@@ -2643,8 +2583,6 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
         conf.ssl_verifyclient_enforce = p->defaults.ssl_verifyclient_enforce;
         conf.ssl_verifyclient_depth   = p->defaults.ssl_verifyclient_depth;
         conf.ssl_read_ahead           = p->defaults.ssl_read_ahead;
-        conf.ssl_disable_client_renegotiation
-          = p->defaults.ssl_disable_client_renegotiation;
 
         int sidx = ps->cvlist[i].k_id;
         for (int j = !p->cvlist[0].v.u2[1]; j < p->nconfig; ++j) {
@@ -2673,7 +2611,7 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
                     conf.ssl_read_ahead = (0 != cpv->v.u);
                     break;
                   case 6: /* ssl.disable-client-renegotiation */
-                    conf.ssl_disable_client_renegotiation = (0 != cpv->v.u);
+                    /*(ignored; unsafe renegotiation disabled by default)*/
                     break;
                   case 7: /* ssl.verifyclient.activate */
                     conf.ssl_verifyclient = (0 != cpv->v.u);
@@ -2769,7 +2707,7 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
         T_CONFIG_BOOL,
         T_CONFIG_SCOPE_CONNECTION }
      ,{ CONST_STR_LEN("ssl.disable-client-renegotiation"),
-        T_CONFIG_BOOL,
+        T_CONFIG_BOOL, /*(directive ignored)*/
         T_CONFIG_SCOPE_CONNECTION }
      ,{ CONST_STR_LEN("ssl.verifyclient.activate"),
         T_CONFIG_BOOL,
@@ -2882,12 +2820,8 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
                 if (0 == i) default_ssl_ca_crl_file = cpv->v.b;
                 break;
               case 5: /* ssl.read-ahead */
-                break;
               case 6: /* ssl.disable-client-renegotiation */
-                /* (force disabled, the default, if HTTP/2 enabled in server) */
-                if (srv->srvconf.h2proto)
-                    cpv->v.u = 1; /* disable client renegotiation */
-                break;
+                /*(ignored; unsafe renegotiation disabled by default)*/
               case 7: /* ssl.verifyclient.activate */
               case 8: /* ssl.verifyclient.enforce */
                 break;
@@ -2994,7 +2928,6 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
     p->defaults.ssl_verifyclient_enforce = 1;
     p->defaults.ssl_verifyclient_depth = 9;
     p->defaults.ssl_verifyclient_export_cert = 0;
-    p->defaults.ssl_disable_client_renegotiation = 1;
     p->defaults.ssl_read_ahead = 0;
 
     /* initialize p->defaults from global config context */
@@ -3013,6 +2946,64 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
   #endif
 
     return mod_openssl_set_defaults_sockets(srv, p);
+}
+
+
+__attribute_cold__
+static int
+mod_openssl_write_err (SSL * const ssl, int wr, connection * const con,
+                       log_error_st * const errh)
+{
+    int ssl_r;
+    unsigned long err;
+
+    switch ((ssl_r = SSL_get_error(ssl, wr))) {
+      case SSL_ERROR_WANT_READ:
+        con->is_readable = -1;
+        return 0; /* try again later */
+      case SSL_ERROR_WANT_WRITE:
+        con->is_writable = -1;
+        return 0; /* try again later */
+      case SSL_ERROR_SYSCALL:
+        /* perhaps we have error waiting in our error-queue */
+        if (0 != (err = ERR_get_error())) {
+            do {
+                log_error(errh, __FILE__, __LINE__,
+                  "SSL: %d %d %s",ssl_r,wr,ERR_error_string(err,NULL));
+            } while ((err = ERR_get_error()));
+        }
+        else if (wr == -1) {
+            /* no, but we have errno */
+            switch (errno) {
+              case EPIPE:
+              case ECONNRESET:
+                return -2;
+              default:
+                log_perror(errh, __FILE__, __LINE__,
+                  "SSL: %d %d", ssl_r, wr);
+                break;
+            }
+        }
+        else {
+            /* neither error-queue nor errno ? */
+            log_perror(errh, __FILE__, __LINE__,
+              "SSL (error): %d %d", ssl_r, wr);
+        }
+        break;
+
+      case SSL_ERROR_ZERO_RETURN:
+        /* clean shutdown on the remote side */
+        if (wr == 0) return -2;
+
+        __attribute_fallthrough__
+      default:
+        while ((err = ERR_get_error()))
+            log_error(errh, __FILE__, __LINE__,
+              "SSL: %d %d %s", ssl_r, wr, ERR_error_string(err, NULL));
+        break;
+    }
+
+    return -1;
 }
 
 
@@ -3071,64 +3062,14 @@ connection_write_cq_ssl (connection * const con, chunkqueue * const cq, off_t ma
         ERR_clear_error();
         wr = SSL_write(ssl, data, data_len);
 
-        if (__builtin_expect( (hctx->renegotiations > 1), 0)
-            && hctx->conf.ssl_disable_client_renegotiation) {
+        if (__builtin_expect( (hctx->renegotiations > 1), 0)) {
             log_error(errh, __FILE__, __LINE__,
               "SSL: renegotiation initiated by client, killing connection");
             return -1;
         }
 
-        if (wr <= 0) {
-            int ssl_r;
-            unsigned long err;
-
-            switch ((ssl_r = SSL_get_error(ssl, wr))) {
-            case SSL_ERROR_WANT_READ:
-                con->is_readable = -1;
-                return 0; /* try again later */
-            case SSL_ERROR_WANT_WRITE:
-                con->is_writable = -1;
-                return 0; /* try again later */
-            case SSL_ERROR_SYSCALL:
-                /* perhaps we have error waiting in our error-queue */
-                if (0 != (err = ERR_get_error())) {
-                    do {
-                        log_error(errh, __FILE__, __LINE__,
-                          "SSL: %d %d %s",ssl_r,wr,ERR_error_string(err,NULL));
-                    } while((err = ERR_get_error()));
-                } else if (wr == -1) {
-                    /* no, but we have errno */
-                    switch(errno) {
-                    case EPIPE:
-                    case ECONNRESET:
-                        return -2;
-                    default:
-                        log_perror(errh, __FILE__, __LINE__,
-                          "SSL: %d %d", ssl_r, wr);
-                        break;
-                    }
-                } else {
-                    /* neither error-queue nor errno ? */
-                    log_perror(errh, __FILE__, __LINE__,
-                      "SSL (error): %d %d", ssl_r, wr);
-                }
-                break;
-
-            case SSL_ERROR_ZERO_RETURN:
-                /* clean shutdown on the remote side */
-
-                if (wr == 0) return -2;
-
-                __attribute_fallthrough__
-            default:
-                while((err = ERR_get_error())) {
-                    log_error(errh, __FILE__, __LINE__,
-                      "SSL: %d %d %s", ssl_r, wr, ERR_error_string(err, NULL));
-                }
-                break;
-            }
-            return -1;
-        }
+        if (wr <= 0)
+            return mod_openssl_write_err(ssl, wr, con, errh);
 
         chunkqueue_mark_written(cq, wr);
         max_bytes -= wr;
@@ -3138,6 +3079,44 @@ connection_write_cq_ssl (connection * const con, chunkqueue * const cq, off_t ma
 
     return 0;
 }
+
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static int
+connection_write_cq_ssl_ktls (connection * const con, chunkqueue * const cq, off_t max_bytes)
+{
+    handler_ctx * const hctx = con->plugin_ctx[plugin_data_singleton->id];
+
+    if (__builtin_expect( (0 != hctx->close_notify), 0))
+        return mod_openssl_close_notify(hctx);
+
+    /* not done: scan cq for FILE_CHUNK within first max_bytes rather than
+     * only using SSL_sendfile() if the first chunk is FILE_CHUNK.
+     * Checking first chunk for FILE_CHUNK means that initial response headers
+     * and beginning of file will be read into memory before subsequent writes
+     * use SSL_sendfile().  TBD: possible to be further optimized? */
+
+    for (chunk *c; (c = cq->first) && c->type == FILE_CHUNK; ) {
+        off_t len = c->file.length - c->offset;
+        if (len > max_bytes) len = max_bytes;
+        if (0 == len) break; /*(FILE_CHUNK or max_bytes should not be 0)*/
+        if (-1 == c->file.fd && 0 != chunkqueue_open_file_chunk(cq, hctx->errh))
+            return -1;
+
+        ossl_ssize_t wr =
+          SSL_sendfile(hctx->ssl, c->file.fd, c->offset, (size_t)len, 0);
+        if (wr < 0)
+            return mod_openssl_write_err(hctx->ssl, (int)wr, con, hctx->errh);
+
+        chunkqueue_mark_written(cq, wr);
+        max_bytes -= wr;
+
+        if (wr < len) return 0; /* try again later */
+    }
+
+    return connection_write_cq_ssl(con, cq, max_bytes);
+}
+#endif
 
 
 static int
@@ -3163,19 +3142,30 @@ connection_read_cq_ssl (connection * const con, chunkqueue * const cq, off_t max
         len = SSL_read(hctx->ssl, mem, mem_len);
         chunkqueue_use_memory(cq, ckpt, len > 0 ? len : 0);
 
-        if (hctx->renegotiations > 1
-            && hctx->conf.ssl_disable_client_renegotiation) {
+        if (hctx->renegotiations > 1) {
             log_error(hctx->errh, __FILE__, __LINE__,
               "SSL: renegotiation initiated by client, killing connection (%s)",
               con->dst_addr_buf.ptr);
             return -1;
         }
 
+      #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        /* ideally should be done only once, after handshake completes,
+         * so check each time for HTTP/2 so that we do not re-enable */
+        if (hctx->r->http_version < HTTP_VERSION_2
+            && BIO_get_ktls_send(SSL_get_wbio(hctx->ssl)) > 0)
+            con->network_write = connection_write_cq_ssl_ktls;
+      #endif
       #ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
         if (hctx->alpn) {
             if (hctx->alpn == MOD_OPENSSL_ALPN_H2) {
                 if (0 != mod_openssl_alpn_h2_policy(hctx))
                     return -1;
+              #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+                /*(not expecting FILE_CHUNKs in write_queue with h2,
+                 * so skip ktls and SSL_sendfile; reset to default)*/
+                con->network_write = connection_write_cq_ssl;
+              #endif
             }
             else if (hctx->alpn == MOD_OPENSSL_ALPN_ACME_TLS_1) {
                 chunkqueue_reset(cq);
@@ -3251,11 +3241,15 @@ connection_read_cq_ssl (connection * const con, chunkqueue * const cq, off_t max
         case SSL_ERROR_ZERO_RETURN:
             /* clean shutdown on the remote side */
 
-            if (rc == 0) {
-                /* FIXME: later */
-            }
+            /* future: might set flag to record that we received CLOSE_NOTIFY
+             * TLS alert from peer, then have future calls to this func return
+             * the equivalent of EOF, but we also want to remove read interest
+             * on fd, perhaps by setting RDHUP.  If setting is_readable, ensure
+             * that callers avoid spinning if we return EOF while is_readable.
+             *
+             * Should we treat this like len == 0 below and return -2 ? */
 
-            __attribute_fallthrough__
+            /*__attribute_fallthrough__*/
         default:
             while((ssl_err = ERR_get_error())) {
                 switch (ERR_GET_REASON(ssl_err)) {
@@ -3427,33 +3421,27 @@ mod_openssl_close_notify(handler_ctx *hctx)
             }
 
             switch ((ssl_r = SSL_get_error(hctx->ssl, ret))) {
-            case SSL_ERROR_ZERO_RETURN:
             case SSL_ERROR_WANT_WRITE:
             case SSL_ERROR_WANT_READ:
+            case SSL_ERROR_ZERO_RETURN: /*(unexpected here)*/
                 hctx->close_notify = -1;
                 return 0; /* try again later */
             case SSL_ERROR_SYSCALL:
-                /* perhaps we have error waiting in our error-queue */
-                errh = hctx->r->conf.errh;
-                if (0 != (err = ERR_get_error())) {
-                    do {
-                        log_error(errh, __FILE__, __LINE__,
-                          "SSL: %d %d %s",ssl_r,ret,ERR_error_string(err,NULL));
-                    } while((err = ERR_get_error()));
-                } else if (errno != 0) {
-                    /*ssl bug (see lighttpd ticket #2213): sometimes errno==0*/
+                if (0 == ERR_peek_error()) {
                     switch(errno) {
+                    case 0: /*ssl bug (see lighttpd ticket #2213)*/
                     case EPIPE:
                     case ECONNRESET:
-                        break;
+                        mod_openssl_detach(hctx);
+                        return -2;
                     default:
-                        log_perror(errh, __FILE__, __LINE__,
+                        log_perror(hctx->r->conf.errh, __FILE__, __LINE__,
                           "SSL (error): %d %d", ssl_r, ret);
                         break;
                     }
+                    break;
                 }
-
-                break;
+                __attribute_fallthrough__
             default:
                 errh = hctx->r->conf.errh;
                 while((err = ERR_get_error())) {
@@ -3690,6 +3678,7 @@ TRIGGER_FUNC(mod_openssl_handle_trigger) {
 }
 
 
+__attribute_cold__
 int mod_openssl_plugin_init (plugin *p);
 int mod_openssl_plugin_init (plugin *p)
 {
@@ -3715,7 +3704,7 @@ int mod_openssl_plugin_init (plugin *p)
  || defined(LIBRESSL_VERSION_NUMBER)
 
 static int
-mod_openssl_ssl_conf_proto_val (server *srv, plugin_config_socket *s, const buffer *b, int max)
+mod_openssl_ssl_conf_proto_val (server *srv, const buffer *b, int max)
 {
     if (NULL == b) /* default: min TLSv1.2, max TLSv1.3 */
       #ifdef TLS1_3_VERSION
@@ -3731,9 +3720,7 @@ mod_openssl_ssl_conf_proto_val (server *srv, plugin_config_socket *s, const buff
            #else
             TLS1_2_VERSION
            #endif
-          : (s->ssl_use_sslv3 ? SSL3_VERSION : TLS1_VERSION);
-    else if (buffer_eq_icase_slen(b, CONST_STR_LEN("SSLv3")))
-        return SSL3_VERSION;
+          : TLS1_VERSION;
     else if (buffer_eq_icase_slen(b, CONST_STR_LEN("TLSv1.0")))
         return TLS1_VERSION;
     else if (buffer_eq_icase_slen(b, CONST_STR_LEN("TLSv1.1")))
@@ -3767,7 +3754,7 @@ static int
 mod_openssl_ssl_conf_cmd (server *srv, plugin_config_socket *s)
 {
     /* reference:
-     * https://www.openssl.org/docs/man1.1.1/man3/SSL_CONF_cmd.html */
+     * https://www.openssl.org/docs/manmaster/man3/SSL_CONF_cmd.html */
     int rc = 0;
     buffer *cipherstring = NULL;
     buffer *ciphersuites = NULL;
@@ -3784,6 +3771,12 @@ mod_openssl_ssl_conf_cmd (server *srv, plugin_config_socket *s)
         else if (buffer_eq_icase_slen(&ds->key, CONST_STR_LEN("Curves"))
               || buffer_eq_icase_slen(&ds->key, CONST_STR_LEN("Groups")))
             curves = &ds->value;
+        else if (buffer_eq_icase_slen(&ds->key, CONST_STR_LEN("DHParameters"))){
+            if (!buffer_is_blank(&ds->value)) {
+                if (!mod_openssl_ssl_conf_dhparameters(srv, s, &ds->value))
+                    rc = -1;
+            }
+        }
         else if (buffer_eq_icase_slen(&ds->key, CONST_STR_LEN("MaxProtocol")))
             maxb = &ds->value;
         else if (buffer_eq_icase_slen(&ds->key, CONST_STR_LEN("MinProtocol")))
@@ -3803,8 +3796,23 @@ mod_openssl_ssl_conf_cmd (server *srv, plugin_config_socket *s)
                     flag = 0;
                     ++v;
                 }
+                else if (*v == '+')
+                    ++v;
                 for (e = v; light_isalpha(*e); ++e) ;
                 switch ((int)(e-v)) {
+                 #ifdef SSL_OP_ENABLE_KTLS
+                  case 4:
+                    if (buffer_eq_icase_ssn(v, "KTLS", 4)) {
+                        if (flag)
+                            SSL_CTX_set_options(s->ssl_ctx,
+                                                SSL_OP_ENABLE_KTLS);
+                        else
+                            SSL_CTX_clear_options(s->ssl_ctx,
+                                                  SSL_OP_ENABLE_KTLS);
+                        continue;
+                    }
+                    break;
+                 #endif
                   case 11:
                     if (buffer_eq_icase_ssn(v, "Compression", 11)) {
                         /* (force disabled, the default, if HTTP/2 enabled) */
@@ -3866,13 +3874,13 @@ mod_openssl_ssl_conf_cmd (server *srv, plugin_config_socket *s)
     }
 
     if (minb) {
-        int n = mod_openssl_ssl_conf_proto_val(srv, s, minb, 0);
+        int n = mod_openssl_ssl_conf_proto_val(srv, minb, 0);
         if (!SSL_CTX_set_min_proto_version(s->ssl_ctx, n))
             rc = -1;
     }
 
     if (maxb) {
-        int x = mod_openssl_ssl_conf_proto_val(srv, s, maxb, 1);
+        int x = mod_openssl_ssl_conf_proto_val(srv, maxb, 1);
         if (!SSL_CTX_set_max_proto_version(s->ssl_ctx, x))
             rc = -1;
     }

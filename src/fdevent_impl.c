@@ -31,10 +31,6 @@ static int fdevent_solaris_port_init(struct fdevents *ev);
 __attribute_cold__
 static int fdevent_solaris_devpoll_init(struct fdevents *ev);
 #endif
-#ifdef FDEVENT_USE_LIBEV
-__attribute_cold__
-static int fdevent_libev_init(struct fdevents *ev);
-#endif
 #ifdef FDEVENT_USE_POLL
 __attribute_cold__
 static int fdevent_poll_init(struct fdevents *ev);
@@ -74,19 +70,14 @@ fdevent_config (const char **event_handler_name, log_error_st *errh)
       #ifdef FDEVENT_USE_SELECT
         { FDEVENT_HANDLER_SELECT,         "select" },
       #endif
-      #ifdef FDEVENT_USE_LIBEV
-        { FDEVENT_HANDLER_LIBEV,          "libev" },
-      #endif
         { FDEVENT_HANDLER_UNSET,          NULL }
     };
 
     const char *event_handler = *event_handler_name;
     fdevent_handler_t et = FDEVENT_HANDLER_UNSET;
 
-  #ifndef FDEVENT_USE_LIBEV
     if (NULL != event_handler && 0 == strcmp(event_handler, "libev"))
         event_handler = NULL;
-  #endif
   #ifdef FDEVENT_USE_POLL
     if (NULL != event_handler && 0 == strcmp(event_handler, "select"))
         event_handler = "poll";
@@ -167,11 +158,6 @@ fdevent_show_event_handlers (void)
      #else
       "\t- kqueue (FreeBSD)\n"
      #endif
-     #ifdef FDEVENT_USE_LIBEV
-      "\t+ libev (generic)\n"
-     #else
-      "\t- libev (generic)\n"
-     #endif
       ;
 }
 
@@ -200,18 +186,11 @@ fdevent_init (const char *event_handler, int *max_fds, int *cur_fds, log_error_s
     *max_fds = (int)maxfds;
     ++maxfds; /*(+1 for event-handler fd)*/
 
-    ev = calloc(1, sizeof(*ev));
-    force_assert(NULL != ev);
+    ev = ck_calloc(1, sizeof(*ev));
     ev->errh = errh;
     ev->cur_fds = cur_fds;
     ev->event_handler = event_handler;
-    ev->fdarray = calloc(maxfds, sizeof(*ev->fdarray));
-    if (NULL == ev->fdarray) {
-        log_error(ev->errh, __FILE__, __LINE__,
-          "server.max-fds too large? (%u)", maxfds-1);
-        free(ev);
-        return NULL;
-    }
+    ev->fdarray = ck_calloc(maxfds, sizeof(*ev->fdarray));
     ev->maxfds = maxfds;
 
     switch(type) {
@@ -243,11 +222,6 @@ fdevent_init (const char *event_handler, int *max_fds, int *cur_fds, log_error_s
      #ifdef FDEVENT_USE_FREEBSD_KQUEUE
       case FDEVENT_HANDLER_FREEBSD_KQUEUE:
         if (0 == fdevent_freebsd_kqueue_init(ev)) return ev;
-        break;
-     #endif
-     #ifdef FDEVENT_USE_LIBEV
-      case FDEVENT_HANDLER_LIBEV:
-        if (0 == fdevent_libev_init(ev)) return ev;
         break;
      #endif
       /*case FDEVENT_HANDLER_UNSET:*/
@@ -420,8 +394,7 @@ fdevent_linux_sysepoll_init (fdevents *ev)
     fdevent_setfd_cloexec(ev->epoll_fd);
   #endif
 
-    ev->epoll_events = malloc(ev->maxfds * sizeof(*ev->epoll_events));
-    force_assert(NULL != ev->epoll_events);
+    ev->epoll_events = ck_calloc(ev->maxfds, sizeof(*ev->epoll_events));
 
     return 0;
 }
@@ -552,8 +525,7 @@ fdevent_freebsd_kqueue_init (fdevents *ev)
     ev->reset      = fdevent_freebsd_kqueue_reset;
     ev->free       = fdevent_freebsd_kqueue_free;
     ev->kq_fd      = -1;
-    ev->kq_results = calloc(ev->maxfds, sizeof(*ev->kq_results));
-    force_assert(NULL != ev->kq_results);
+    ev->kq_results = ck_calloc(ev->maxfds, sizeof(*ev->kq_results));
     return 0;
 }
 
@@ -652,8 +624,7 @@ fdevent_solaris_port_init (fdevents *ev)
     ev->event_del   = fdevent_solaris_port_event_del;
     ev->poll        = fdevent_solaris_port_poll;
     ev->free        = fdevent_solaris_port_free;
-    ev->port_events = malloc(ev->maxfds * sizeof(*ev->port_events));
-    force_assert(NULL != ev->port_events);
+    ev->port_events = ck_calloc(ev->maxfds, sizeof(*ev->port_events));
 
     if ((ev->port_fd = port_create()) < 0) return -1;
 
@@ -753,142 +724,11 @@ fdevent_solaris_devpoll_init (fdevents *ev)
     ev->reset      = fdevent_solaris_devpoll_reset;
     ev->free       = fdevent_solaris_devpoll_free;
     ev->devpoll_fd = -1;
-    ev->devpollfds = malloc(sizeof(*ev->devpollfds) * ev->maxfds);
-    force_assert(NULL != ev->devpollfds);
+    ev->devpollfds = ck_calloc(ev->maxfds, sizeof(*ev->devpollfds));
     return 0;
 }
 
 #endif /* FDEVENT_USE_SOLARIS_DEVPOLL */
-
-
-#ifdef FDEVENT_USE_LIBEV
-
-#if (defined(__APPLE__) && defined(__MACH__)) \
-  || defined(__FreeBSD__) || defined(__NetBSD__) \
-  || defined(__OpenBSD__) || defined(__DragonFly__)
-/* libev EV_ERROR conflicts with kqueue sys/event.h EV_ERROR */
-#undef EV_ERROR
-#endif
-
-#include <ev.h>
-
-static void
-fdevent_libev_io_watcher_cb (struct ev_loop *loop, ev_io *w, int revents)
-{
-    fdevents *ev = w->data;
-    fdnode *fdn = ev->fdarray[w->fd];
-    int rv = 0;
-    UNUSED(loop);
-
-    if (revents & EV_READ)  rv |= FDEVENT_IN;
-    if (revents & EV_WRITE) rv |= FDEVENT_OUT;
-    if (revents & EV_ERROR) rv |= FDEVENT_ERR;
-
-    if (0 == ((uintptr_t)fdn & 0x3))
-        (*fdn->handler)(fdn->ctx, rv);
-}
-
-static int
-fdevent_libev_event_del (fdevents *ev, fdnode *fdn)
-{
-    ev_io *watcher = fdn->handler_ctx;
-    if (!watcher) return 0;
-    fdn->handler_ctx = NULL;
-
-    ev_io_stop(ev->libev_loop, watcher);
-    free(watcher);
-
-    return 0;
-}
-
-static int
-fdevent_libev_event_set (fdevents *ev, fdnode *fdn, int events)
-{
-    ev_io *watcher = fdn->handler_ctx;
-    int ev_events = 0;
-
-    if (events & FDEVENT_IN)  ev_events |= EV_READ;
-    if (events & FDEVENT_OUT) ev_events |= EV_WRITE;
-
-    if (!watcher) {
-        fdn->handler_ctx = watcher = calloc(1, sizeof(ev_io));
-        force_assert(watcher);
-        fdn->fde_ndx = fdn->fd;
-
-        ev_io_init(watcher, fdevent_libev_io_watcher_cb, fdn->fd, ev_events);
-        watcher->data = ev;
-        ev_io_start(ev->libev_loop, watcher);
-    }
-    else {
-        if ((watcher->events & (EV_READ | EV_WRITE)) != ev_events) {
-            ev_io_stop(ev->libev_loop, watcher);
-            ev_io_set(watcher, watcher->fd, ev_events);
-            ev_io_start(ev->libev_loop, watcher);
-        }
-    }
-
-    return 0;
-}
-
-static void
-fdevent_libev_timeout_watcher_cb (struct ev_loop *loop, ev_timer *w, int revents)
-{
-    UNUSED(loop);
-    UNUSED(w);
-    UNUSED(revents);
-}
-
-static ev_timer timeout_watcher;
-
-static int
-fdevent_libev_poll (fdevents *ev, int timeout_ms)
-{
-    timeout_watcher.repeat = (timeout_ms > 0) ? timeout_ms/1000.0 : 0.001;
-
-    ev_timer_again(ev->libev_loop, &timeout_watcher);
-    ev_run(ev->libev_loop, EVRUN_ONCE);
-
-    return 0;
-}
-
-__attribute_cold__
-static int
-fdevent_libev_reset (fdevents *ev)
-{
-    UNUSED(ev);
-    ev_default_fork();
-    return 0;
-}
-
-__attribute_cold__
-static void
-fdevent_libev_free (fdevents *ev)
-{
-    UNUSED(ev);
-}
-
-__attribute_cold__
-static int
-fdevent_libev_init (fdevents *ev)
-{
-    struct ev_timer * const timer = &timeout_watcher;
-    memset(timer, 0, sizeof(*timer));
-
-    ev->type      = FDEVENT_HANDLER_LIBEV;
-    ev->event_set = fdevent_libev_event_set;
-    ev->event_del = fdevent_libev_event_del;
-    ev->poll      = fdevent_libev_poll;
-    ev->reset     = fdevent_libev_reset;
-    ev->free      = fdevent_libev_free;
-
-    if (NULL == (ev->libev_loop = ev_default_loop(0))) return -1;
-
-    ev_timer_init(timer, fdevent_libev_timeout_watcher_cb, 0.0, 1.0);
-
-    return 0;
-}
-
-#endif /* FDEVENT_USE_LIBEV */
 
 
 #ifdef FDEVENT_USE_POLL
@@ -912,10 +752,9 @@ fdevent_poll_event_del (fdevents *ev, fdnode *fdn)
     /* ev->pollfds[k].revents = 0; */
 
     if (ev->unused.size == ev->unused.used) {
+        ck_realloc_u32((void **)&ev->unused.ptr, ev->unused.size,
+                       16, sizeof(*ev->unused.ptr));
         ev->unused.size += 16;
-        ev->unused.ptr = realloc(ev->unused.ptr,
-                                 sizeof(*(ev->unused.ptr)) * ev->unused.size);
-        force_assert(NULL != ev->unused.ptr);
     }
 
     ev->unused.ptr[ev->unused.used++] = k;
@@ -945,9 +784,9 @@ fdevent_poll_event_set (fdevents *ev, fdnode *fdn, int events)
     }
     else {
         if (ev->size == ev->used) {
+            ck_realloc_u32((void **)&ev->pollfds, ev->size,
+                           16, sizeof(*ev->pollfds));
             ev->size += 16;
-            ev->pollfds = realloc(ev->pollfds, sizeof(*ev->pollfds) * ev->size);
-            force_assert(NULL != ev->pollfds);
         }
 
         k = ev->used++;

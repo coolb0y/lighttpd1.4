@@ -42,22 +42,15 @@ typedef struct pcre_keyvalue {
 } pcre_keyvalue;
 
 pcre_keyvalue_buffer *pcre_keyvalue_buffer_init(void) {
-	pcre_keyvalue_buffer *kvb;
-
-	kvb = calloc(1, sizeof(*kvb));
-	force_assert(NULL != kvb);
-
-	return kvb;
+	return ck_calloc(1, sizeof(pcre_keyvalue_buffer));
 }
 
 int pcre_keyvalue_buffer_append(log_error_st *errh, pcre_keyvalue_buffer *kvb, const buffer *key, const buffer *value, const int pcre_jit) {
 
 	pcre_keyvalue *kv;
 
-	if (0 == (kvb->used & 3)) { /*(allocate in groups of 4)*/
-		kvb->kv = realloc(kvb->kv, (kvb->used + 4) * sizeof(*kvb->kv));
-		force_assert(NULL != kvb->kv);
-	}
+	if (!(kvb->used & (4-1))) /*(allocate in groups of 4)*/
+		ck_realloc_u32((void **)&kvb->kv,kvb->used,4,sizeof(*kvb->kv));
 
 	kv = kvb->kv + kvb->used++;
 

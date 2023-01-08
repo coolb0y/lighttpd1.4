@@ -186,7 +186,7 @@ static int mod_wstunnel_frame_recv(handler_ctx *);
 #define _MOD_WEBSOCKET_SPEC_RFC_6455_
 
 INIT_FUNC(mod_wstunnel_init) {
-    return calloc(1, sizeof(plugin_data));
+    return ck_calloc(1, sizeof(plugin_data));
 }
 
 static void mod_wstunnel_merge_config_cpv(plugin_config * const pconf, const config_plugin_value_t * const cpv) {
@@ -277,8 +277,7 @@ SETDEFAULTS_FUNC(mod_wstunnel_set_defaults) {
         for (; -1 != cpv->k_id; ++cpv) {
             switch (cpv->k_id) {
               case 0: /* wstunnel.server */
-                gw = calloc(1, sizeof(gw_plugin_config));
-                force_assert(gw);
+                gw = ck_calloc(1, sizeof(gw_plugin_config));
                 if (!gw_set_defaults_backend(srv, (gw_plugin_data *)p, cpv->v.a,
                                              gw, 0, cpk[cpv->k_id].k)) {
                     gw_plugin_config_free(gw);
@@ -635,6 +634,8 @@ TRIGGER_FUNC(mod_wstunnel_handle_trigger) {
     return HANDLER_GO_ON;
 }
 
+
+__attribute_cold__
 int mod_wstunnel_plugin_init(plugin *p);
 int mod_wstunnel_plugin_init(plugin *p) {
     p->version           = LIGHTTPD_VERSION_ID;
@@ -712,8 +713,11 @@ static int create_MD5_sum(request_st * const r) {
     (s)[1]=((u)>>16);    \
     (s)[2]=((u)>>8);     \
     (s)[3]=((u))
-    ws_htole32((unsigned char *)(buf+0), buf[0]);
-    ws_htole32((unsigned char *)(buf+1), buf[1]);
+    uint32_t u;
+    u = buf[0];
+    ws_htole32((unsigned char *)(buf+0), u);
+    u = buf[1];
+    ws_htole32((unsigned char *)(buf+1), u);
   #endif
     /*(overwrite buf[] with result)*/
     MD5_once((unsigned char *)buf, buf, sizeof(buf));
@@ -905,8 +909,7 @@ static int send_ietf_00(handler_ctx *hctx, mod_wstunnel_frame_type_t type, const
         http_chunk_append_mem(r, &head, 1);
         len = 4*(siz/3)+4+1;
         /* avoid accumulating too much data in memory; send to tmpfile */
-        mem = malloc(len);
-        force_assert(mem);
+        mem = ck_malloc(len);
         len=li_to_base64(mem,len,(unsigned char *)payload,siz,BASE64_STANDARD);
         http_chunk_append_mem(r, mem, len);
         free(mem);

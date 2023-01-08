@@ -344,8 +344,7 @@ int config_plugin_values_init(server * const srv, void *p_d, const config_plugin
     /*(+1 to include global scope, whether or not any directives exist)*/
     /*(+n for extra element to end each list)*/
     p->cvlist = (config_plugin_value_t *)
-      calloc(1+n+n+elts, sizeof(config_plugin_value_t));
-    force_assert(p->cvlist);
+      ck_calloc(1+n+n+elts, sizeof(config_plugin_value_t));
 
     elts = 1+n;
     /* shift past first element if no directives in global scope */
@@ -485,7 +484,7 @@ static cond_result_t config_check_cond_nocache(request_st * const r, const data_
 static cond_result_t config_check_cond_nocache_eval(request_st * const r, const data_config * const dc, const int debug_cond, cond_cache_t * const cache) {
 	/* pass the rules */
 
-	static struct const_char_buffer {
+	static const struct const_char_buffer {
 	  const char *ptr;
 	  uint32_t used;
 	  uint32_t size;
@@ -513,7 +512,6 @@ static cond_result_t config_check_cond_nocache_eval(request_st * const r, const 
 		break;
 	case COMP_HTTP_REQUEST_HEADER:
 		l = http_header_request_get(r, dc->ext, BUF_PTR_LEN(&dc->comp_tag));
-		if (NULL == l) l = (buffer *)&empty_string;
 		break;
 	case COMP_HTTP_REQUEST_METHOD:
 		l = http_method_buf(r->http_method);
@@ -522,7 +520,7 @@ static cond_result_t config_check_cond_nocache_eval(request_st * const r, const 
 		return (cache->local_result = COND_RESULT_FALSE);
 	}
 
-	if (__builtin_expect( (buffer_is_blank(l)), 0))
+	if (__builtin_expect( (buffer_is_empty(l)), 0))
 		l = (buffer *)&empty_string;
 
 	if (debug_cond)
@@ -714,8 +712,7 @@ static int config_pcre_match(request_st * const r, const data_config * const dc,
       r->cond_match[capture_offset] = r->cond_match_data + capture_offset;
     if (__builtin_expect( (NULL == cond_match->matches), 0)) {
         /*(allocate on demand)*/
-        cond_match->matches = malloc(dc->ovec_nelts * sizeof(int));
-        force_assert(cond_match->matches);
+        cond_match->matches = ck_malloc(dc->ovec_nelts * sizeof(int));
     }
     cond_match->comp_value = b; /*holds pointer to b (!) for pattern subst*/
     cond_match->captures =

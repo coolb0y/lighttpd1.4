@@ -1086,8 +1086,7 @@ static int config_insert(server *srv) {
     };
 
     int rc = 0;
-    config_data_base * const p = calloc(1, sizeof(config_data_base));
-    force_assert(p);
+    config_data_base * const p = ck_calloc(1, sizeof(config_data_base));
     srv->config_data_base = p;
 
     if (!config_plugin_values_init(srv, p, cpk, "base"))
@@ -1171,8 +1170,7 @@ static int config_insert(server *srv) {
                     cpv->v.shrt |=FDEVENT_STREAM_RESPONSE;
                 break;
               case 18:{/*server.kbytes-per-second */
-                off_t * const cnt = malloc(2*sizeof(off_t));
-                force_assert(cnt);
+                off_t * const cnt = ck_malloc(2*sizeof(off_t));
                 cnt[0] = 0;
                 cnt[1] = (off_t)cpv->v.shrt << 10;
                 cpv->v.v = cnt;
@@ -1280,6 +1278,10 @@ int config_finalize(server *srv, const buffer *default_server_tag) {
 
             /* all var.* is known as user defined variable */
             if (strncmp(k->ptr, "var.", sizeof("var.") - 1) == 0)
+                continue;
+            /* mod_dirlisting not loaded if dir-listing.activate not enabled */
+            if (strncmp(k->ptr, "dir-listing.", sizeof("dir-listing.") - 1) == 0
+                && strcmp(k->ptr, "dir-listing.activate") != 0)
                 continue;
 
             if (!array_get_element_klen(srv->srvconf.config_touched,
@@ -2437,12 +2439,14 @@ int config_remoteip_normalize(buffer * const b, buffer * const tb) {
 static void context_init(server *srv, config_t *context) {
 	context->srv = srv;
 	context->ok = 1;
-	vector_config_weak_init(&context->configs_stack);
+	context->configs_stack.data = NULL;
+	context->configs_stack.used = 0;
+	context->configs_stack.size = 0;
 	context->basedir = buffer_init();
 }
 
 static void context_free(config_t *context) {
-	vector_config_weak_clear(&context->configs_stack);
+	free(context->configs_stack.data);
 	buffer_free(context->basedir);
 }
 

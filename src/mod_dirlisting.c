@@ -110,10 +110,10 @@ typedef struct {
 typedef struct {
 	dirls_entry_t **ent;
 	uint32_t used;
-	uint32_t size;
 } dirls_list_t;
 
 #define DIRLIST_ENT_NAME(ent)  ((char*)(ent) + sizeof(dirls_entry_t))
+/* DIRLIST_BLOB_SIZE must be power of 2 for current internal usage */
 #define DIRLIST_BLOB_SIZE      16
 
 typedef struct {
@@ -137,8 +137,7 @@ static int dirlist_max_in_progress;
 
 
 static handler_ctx * mod_dirlisting_handler_ctx_init (plugin_data * const p) {
-    handler_ctx *hctx = calloc(1, sizeof(*hctx));
-    force_assert(hctx);
+    handler_ctx *hctx = ck_calloc(1, sizeof(*hctx));
     memcpy(&hctx->conf, &p->conf, sizeof(plugin_config));
     return hctx;
 }
@@ -210,8 +209,8 @@ static struct dirlist_cache * mod_dirlisting_parse_cache(server *srv, const arra
         }
     }
 
-    struct dirlist_cache * const cache = calloc(1, sizeof(struct dirlist_cache));
-    force_assert(cache);
+    struct dirlist_cache * const cache =
+      ck_calloc(1, sizeof(struct dirlist_cache));
     cache->max_age = max_age;
     cache->path = path;
     return cache;
@@ -261,7 +260,7 @@ static int mod_dirlisting_exclude(pcre_keyvalue_buffer * const kvb, const char *
 
 
 INIT_FUNC(mod_dirlisting_init) {
-    return calloc(1, sizeof(plugin_data));
+    return ck_calloc(1, sizeof(plugin_data));
 }
 
 FREE_FUNC(mod_dirlisting_free) {
@@ -996,8 +995,7 @@ static int http_open_directory(request_st * const r, handler_ctx * const hctx) {
     /* allocate based on PATH_MAX rather than pathconf() to get _PC_NAME_MAX */
     hctx->name_max = PATH_MAX - dlen - 1;
 #endif
-    hctx->path = malloc(dlen + hctx->name_max + 1);
-    force_assert(NULL != hctx->path);
+    hctx->path = ck_malloc(dlen + hctx->name_max + 1);
     memcpy(hctx->path, r->physical.path.ptr, dlen+1);
   #if defined(HAVE_XATTR) || defined(HAVE_EXTATTR) || !defined(_ATFILE_SOURCE)
     hctx->path_file = hctx->path + dlen;
@@ -1023,15 +1021,9 @@ static int http_open_directory(request_st * const r, handler_ctx * const hctx) {
 
     dirls_list_t * const dirs = &hctx->dirs;
     dirls_list_t * const files = &hctx->files;
-    dirs->ent   =
-      (dirls_entry_t**) malloc(sizeof(dirls_entry_t*) * DIRLIST_BLOB_SIZE);
-    force_assert(dirs->ent);
-    dirs->size  = DIRLIST_BLOB_SIZE;
+    dirs->ent   = NULL;
     dirs->used  = 0;
-    files->ent  =
-      (dirls_entry_t**) malloc(sizeof(dirls_entry_t*) * DIRLIST_BLOB_SIZE);
-    force_assert(files->ent);
-    files->size = DIRLIST_BLOB_SIZE;
+    files->ent  = NULL;
     files->used = 0;
 
     return 0;
@@ -1125,14 +1117,11 @@ static int http_read_directory(handler_ctx * const p) {
 		}
 
 		dirls_list_t * const list = !S_ISDIR(st.st_mode) ? &p->files : &p->dirs;
-		if (list->used == list->size) {
-			list->size += DIRLIST_BLOB_SIZE;
-			list->ent   = (dirls_entry_t**) realloc(list->ent, sizeof(dirls_entry_t*) * list->size);
-			force_assert(list->ent);
-		}
+		if (!(list->used & (DIRLIST_BLOB_SIZE-1)))
+			ck_realloc_u32((void **)&list->ent, list->used,
+			               DIRLIST_BLOB_SIZE, sizeof(*list->ent));
 		dirls_entry_t * const tmp = list->ent[list->used++] =
-		  (dirls_entry_t*) malloc(sizeof(dirls_entry_t) + 1 + dsz);
-		force_assert(tmp);
+		  (dirls_entry_t*) ck_malloc(sizeof(dirls_entry_t) + 1 + dsz);
 		tmp->mtime = st.st_mtime;
 		tmp->size  = st.st_size;
 		tmp->namelen = dsz;
@@ -1641,8 +1630,7 @@ static void mod_dirlisting_cache_json_init (request_st * const r, handler_ctx * 
     if (fd < 0) return;
     hctx->jfn_len = buffer_clen(tb);
     hctx->jfd = fd;
-    hctx->jfn = malloc(hctx->jfn_len+1);
-    force_assert(hctx->jfn);
+    hctx->jfn = ck_malloc(hctx->jfn_len+1);
     memcpy(hctx->jfn, tb->ptr, hctx->jfn_len+1); /*(include '\0')*/
 }
 
@@ -1667,6 +1655,7 @@ static void mod_dirlisting_cache_json (request_st * const r, handler_ctx * const
 }
 
 
+__attribute_cold__
 int mod_dirlisting_plugin_init(plugin *p);
 int mod_dirlisting_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

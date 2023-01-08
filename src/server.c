@@ -193,6 +193,59 @@ static void signal_handler(int sig) {
 }
 #endif
 
+
+static void server_main_setup_signals (void) {
+  #ifdef HAVE_SIGACTION
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    sigemptyset(&act.sa_mask);
+
+    act.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &act, NULL);
+
+   #ifndef _MSC_VER
+    act.sa_flags = SA_NODEFER;
+    act.sa_handler = sys_setjmp_sigbus;
+    sigaction(SIGBUS, &act, NULL);
+    act.sa_flags = 0;
+   #endif
+
+   #if defined(SA_SIGINFO)
+    last_sighup_info.si_uid = 0,
+    last_sighup_info.si_pid = 0;
+    last_sigterm_info.si_uid = 0,
+    last_sigterm_info.si_pid = 0;
+    act.sa_sigaction = sigaction_handler;
+    act.sa_flags = SA_SIGINFO;
+   #else
+    act.sa_handler = signal_handler;
+    act.sa_flags = 0;
+   #endif
+    sigaction(SIGINT,  &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
+    sigaction(SIGHUP,  &act, NULL);
+    sigaction(SIGALRM, &act, NULL);
+    sigaction(SIGUSR1, &act, NULL);
+
+    /* it should be safe to restart syscalls after SIGCHLD */
+    act.sa_flags |= SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &act, NULL);
+  #elif defined(HAVE_SIGNAL)
+    /* ignore the SIGPIPE from sendfile() */
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGALRM, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGHUP,  signal_handler);
+    signal(SIGCHLD, signal_handler);
+    signal(SIGINT,  signal_handler);
+    signal(SIGUSR1, signal_handler);
+   #ifndef _MSC_VER
+    signal(SIGBUS,  sys_setjmp_sigbus);
+   #endif
+  #endif
+}
+
+
 #ifdef HAVE_FORK
 static int daemonize(void) {
 	int pipefd[2];
@@ -285,8 +338,7 @@ __attribute_cold__
 __attribute_noinline__
 __attribute_returns_nonnull__
 static server *server_init(void) {
-	server *srv = calloc(1, sizeof(*srv));
-	force_assert(srv);
+	server *srv = ck_calloc(1, sizeof(*srv));
 
 	srv->tmp_buf = buffer_init();
 
@@ -882,20 +934,6 @@ static int server_graceful_state_bg (server *srv) {
         ? argv[0][0] != '/'
         : NULL == strchr(argv[0], '/')) return 0;
 
-  #if 0
-    /* disabled; not fully implemented
-     * srv->srvconf.systemd_socket_activation might be cleared in network_init()
-     * leading to issuing a false warning
-     */
-    /* warn if server.systemd-socket-activation not enabled
-     * (While this warns on existing config rather than new config,
-     *  it is probably a decent predictor for presence in new config) */
-    if (!srv->srvconf.systemd_socket_activation)
-        log_error(srv->errh, __FILE__, __LINE__,
-          "[note] server.systemd-socket-activation not enabled; "
-          "listen sockets will be closed and reopened");
-  #endif
-
     /* flush log buffers to avoid potential duplication of entries
      * server_handle_sighup(srv) does the following, but skip logging */
     plugins_call_handle_sighup(srv);
@@ -1066,21 +1104,138 @@ static void server_load_check (server *srv) {
         server_sockets_disable(srv);
 }
 
+#ifdef HAVE_FORK
+__attribute_noinline__
+static int server_main_setup_workers (server * const srv, const int npids) {
+    pid_t pid;
+    int num_childs = npids;
+    int child = 0;
+    unsigned int timer = 0;
+    pid_t pids[npids];
+    for (int n = 0; n < npids; ++n) pids[n] = -1;
+    server_graceful_signal_prev_generation();
+    while (!child && !srv_shutdown && !graceful_shutdown) {
+        if (num_childs > 0) {
+            switch ((pid = fork())) {
+              case -1:
+                return -1;
+              case 0:
+                child = 1;
+                alarm(0);
+                break;
+              default:
+                num_childs--;
+                for (int n = 0; n < npids; ++n) {
+                    if (-1 == pids[n]) {
+                        pids[n] = pid;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        else {
+            int status;
+            unix_time64_t mono_ts;
+            if (-1 != (pid = fdevent_waitpid_intr(-1, &status))) {
+                mono_ts = log_monotonic_secs;
+                log_monotonic_secs = server_monotonic_secs();
+                log_epoch_secs =
+                  server_epoch_secs(srv, log_monotonic_secs - mono_ts);
+                if (plugins_call_handle_waitpid(srv, pid, status)
+                    != HANDLER_GO_ON) {
+                    if (!timer) alarm((timer = 5));
+                    continue;
+                }
+                switch (fdlog_pipes_waitpid_cb(pid)) {
+                  default: break;
+                  case -1: if (!timer) alarm((timer = 5));
+                           __attribute_fallthrough__
+                  case  1: continue;
+                }
+                /**
+                 * check if one of our workers went away
+                 */
+                for (int n = 0; n < npids; ++n) {
+                    if (pid == pids[n]) {
+                        pids[n] = -1;
+                        num_childs++;
+                        break;
+                    }
+                }
+            }
+            else if (errno == EINTR) {
+                mono_ts = log_monotonic_secs;
+                log_monotonic_secs = server_monotonic_secs();
+                log_epoch_secs =
+                  server_epoch_secs(srv, log_monotonic_secs - mono_ts);
+                /* On SIGHUP, cycle logs (periodic maint runs in children) */
+                if (handle_sig_hup) {
+                    handle_sig_hup = 0;
+                    fdlog_files_cycle(srv->errh);/*reopen log files, not pipes*/
+                    /* forward SIGHUP to workers */
+                    for (int n = 0; n < npids; ++n) {
+                        if (pids[n] > 0) kill(pids[n], SIGHUP);
+                    }
+                }
+                if (handle_sig_alarm) {
+                    handle_sig_alarm = 0;
+                    timer = 0;
+                    plugins_call_handle_trigger(srv);
+                    fdlog_pipes_restart(log_monotonic_secs);
+                }
+            }
+        }
+    }
+
+    if (!child) {
+        /* exit point for parent monitoring workers;
+         * signal children, too */
+        if (graceful_shutdown || graceful_restart) {
+            /* flag to ignore one SIGINT if graceful_restart */
+            if (graceful_restart) graceful_restart = 2;
+            kill(0, SIGINT);
+            server_graceful_state(srv);
+        }
+        else if (srv_shutdown)
+            kill(0, SIGTERM);
+
+        return 0;
+    }
+
+    /* ignore SIGUSR1 in workers; only parent directs graceful restart */
+  #ifdef HAVE_SIGACTION
+    struct sigaction actignore;
+    memset(&actignore, 0, sizeof(actignore));
+    actignore.sa_handler = SIG_IGN;
+    sigaction(SIGUSR1, &actignore, NULL);
+  #elif defined(HAVE_SIGNAL)
+    signal(SIGUSR1, SIG_IGN);
+  #endif
+
+    /**
+     * make sure workers do not muck with pid-file
+     */
+    if (0 <= pid_fd) {
+        close(pid_fd);
+        pid_fd = -1;
+    }
+    srv->srvconf.pid_file = NULL;
+
+    fdlog_pipes_abandon_pids();
+    srv->pid = getpid();
+    li_rand_reseed();
+
+    return 1; /* child worker */
+}
+#endif
+
 __attribute_cold__
 __attribute_noinline__
 static int server_main_setup (server * const srv, int argc, char **argv) {
 	int print_config = 0;
 	int test_config = 0;
 	int i_am_root = 0;
-	int o;
-#ifdef HAVE_FORK
-	int num_childs = 0;
-#endif
-	uint32_t i;
-#ifdef HAVE_SIGACTION
-	struct sigaction act;
-#endif
-
 #ifdef HAVE_FORK
 	int parent_pipe_fd = -1;
 #endif
@@ -1111,7 +1266,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
   // use case.
   optind = 1;
 
-	while(-1 != (o = getopt(argc, argv, "f:m:i:hvVD1pt"))) {
+	for (int o; -1 != (o = getopt(argc, argv, "f:m:i:hvVD1pt")); ) {
 		switch(o) {
 		case 'f':
 			if (srv->config_data_base) {
@@ -1170,6 +1325,9 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		return -1;
 	}
 
+	if (1 == srv->srvconf.max_worker)
+		srv->srvconf.max_worker = 0;
+
 	if (print_config) {
 		config_print(srv);
 		puts(srv->tmp_buf->ptr);
@@ -1189,6 +1347,11 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	if (test_config || print_config) {
 		return 0;
 	}
+
+  #if defined(HAVE_MALLOC_TRIM)
+	if (srv->srvconf.max_conns <= 16 && malloc_top_pad == 524288)
+		malloc_top_pad = 131072; /*(reduce memory use on small systems)*/
+  #endif
 
 	if (oneshot_fd) {
 		if (oneshot_fd <= STDERR_FILENO) {
@@ -1300,12 +1463,13 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	}
 
 	/* mod_indexfile should be listed in server.modules prior to dynamic handlers */
-	i = 0;
+	uint32_t i = 0;
 	for (const char *pname = NULL; i < srv->plugins.used; ++i) {
 		plugin *p = ((plugin **)srv->plugins.ptr)[i];
-		if (NULL != pname && 0 == strcmp(p->name, "indexfile")) {
-			log_error(srv->errh, __FILE__, __LINE__,
-			  "Warning: mod_indexfile should be listed in server.modules prior to mod_%s", pname);
+		if (0 == strcmp(p->name, "indexfile")) {
+			if (pname)
+				log_error(srv->errh, __FILE__, __LINE__,
+				  "Warning: mod_indexfile should be listed in server.modules prior to mod_%s", pname);
 			break;
 		}
 		if (p->handle_subrequest_start && p->handle_subrequest) {
@@ -1513,55 +1677,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	graceful_restart = 0;/*(reset here after avoiding further daemonizing)*/
 	if (0 == oneshot_fd) graceful_shutdown = 0;
 
-
-#ifdef HAVE_SIGACTION
-	memset(&act, 0, sizeof(act));
-	sigemptyset(&act.sa_mask);
-
-	act.sa_handler = SIG_IGN;
-	sigaction(SIGPIPE, &act, NULL);
-
-#ifndef _MSC_VER
-	act.sa_flags = SA_NODEFER;
-	act.sa_handler = sys_setjmp_sigbus;
-	sigaction(SIGBUS, &act, NULL);
-	act.sa_flags = 0;
-#endif
-
-# if defined(SA_SIGINFO)
-	last_sighup_info.si_uid = 0,
-	last_sighup_info.si_pid = 0;
-	last_sigterm_info.si_uid = 0,
-	last_sigterm_info.si_pid = 0;
-	act.sa_sigaction = sigaction_handler;
-	act.sa_flags = SA_SIGINFO;
-# else
-	act.sa_handler = signal_handler;
-	act.sa_flags = 0;
-# endif
-	sigaction(SIGINT,  &act, NULL);
-	sigaction(SIGTERM, &act, NULL);
-	sigaction(SIGHUP,  &act, NULL);
-	sigaction(SIGALRM, &act, NULL);
-	sigaction(SIGUSR1, &act, NULL);
-
-	/* it should be safe to restart syscalls after SIGCHLD */
-	act.sa_flags |= SA_RESTART | SA_NOCLDSTOP;
-	sigaction(SIGCHLD, &act, NULL);
-#elif defined(HAVE_SIGNAL)
-	/* ignore the SIGPIPE from sendfile() */
-	signal(SIGPIPE, SIG_IGN);
-	signal(SIGALRM, signal_handler);
-	signal(SIGTERM, signal_handler);
-	signal(SIGHUP,  signal_handler);
-	signal(SIGCHLD,  signal_handler);
-	signal(SIGINT,  signal_handler);
-	signal(SIGUSR1, signal_handler);
-#ifndef _MSC_VER
-	signal(SIGBUS,  sys_setjmp_sigbus);
-#endif
-#endif
-
+	server_main_setup_signals();
 
 	srv->gid = getgid();
 	srv->uid = getuid();
@@ -1626,138 +1742,10 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	}
 
 	/* start watcher and workers */
-	num_childs = srv->srvconf.max_worker;
-	if (num_childs > 0) {
-		pid_t pids[num_childs];
-		pid_t pid;
-		const int npids = num_childs;
-		int child = 0;
-		unsigned int timer = 0;
-		for (int n = 0; n < npids; ++n) pids[n] = -1;
-		server_graceful_signal_prev_generation();
-		while (!child && !srv_shutdown && !graceful_shutdown) {
-			if (num_childs > 0) {
-				switch ((pid = fork())) {
-				case -1:
-					return -1;
-				case 0:
-					child = 1;
-					alarm(0);
-					break;
-				default:
-					num_childs--;
-					for (int n = 0; n < npids; ++n) {
-						if (-1 == pids[n]) {
-							pids[n] = pid;
-							break;
-						}
-					}
-					break;
-				}
-			} else {
-				int status;
-				unix_time64_t mono_ts;
-
-				if (-1 != (pid = fdevent_waitpid_intr(-1, &status))) {
-					mono_ts = log_monotonic_secs;
-					log_monotonic_secs = server_monotonic_secs();
-					log_epoch_secs = server_epoch_secs(srv, log_monotonic_secs - mono_ts);
-					if (plugins_call_handle_waitpid(srv, pid, status) != HANDLER_GO_ON) {
-						if (!timer) alarm((timer = 5));
-						continue;
-					}
-					switch (fdlog_pipes_waitpid_cb(pid)) {
-					  default: break;
-					  case -1: if (!timer) alarm((timer = 5));
-						   __attribute_fallthrough__
-					  case  1: continue;
-					}
-					/** 
-					 * check if one of our workers went away
-					 */
-					for (int n = 0; n < npids; ++n) {
-						if (pid == pids[n]) {
-							pids[n] = -1;
-							num_childs++;
-							break;
-						}
-					}
-				} else {
-					switch (errno) {
-					case EINTR:
-						mono_ts = log_monotonic_secs;
-						log_monotonic_secs = server_monotonic_secs();
-						log_epoch_secs = server_epoch_secs(srv, log_monotonic_secs - mono_ts);
-						/**
-						 * if we receive a SIGHUP we have to close our logs ourself as we don't 
-						 * have the mainloop who can help us here
-						 */
-						if (handle_sig_hup) {
-							handle_sig_hup = 0;
-							fdlog_files_cycle(srv->errh); /* reopen log files, not pipes */
-
-							/* forward SIGHUP to workers */
-							for (int n = 0; n < npids; ++n) {
-								if (pids[n] > 0) kill(pids[n], SIGHUP);
-							}
-						}
-						if (handle_sig_alarm) {
-							handle_sig_alarm = 0;
-							timer = 0;
-							plugins_call_handle_trigger(srv);
-							fdlog_pipes_restart(log_monotonic_secs);
-						}
-						break;
-					default:
-						break;
-					}
-				}
-			}
-		}
-
-		/**
-		 * for the parent this is the exit-point 
-		 */
-		if (!child) {
-			/** 
-			 * kill all children too 
-			 */
-			if (graceful_shutdown || graceful_restart) {
-				/* flag to ignore one SIGINT if graceful_restart */
-				if (graceful_restart) graceful_restart = 2;
-				kill(0, SIGINT);
-				server_graceful_state(srv);
-			} else if (srv_shutdown) {
-				kill(0, SIGTERM);
-			}
-
-			return 0;
-		}
-
-		/* ignore SIGUSR1 in workers; only parent directs graceful restart */
-	      #ifdef HAVE_SIGACTION
-		{
-			struct sigaction actignore;
-			memset(&actignore, 0, sizeof(actignore));
-			actignore.sa_handler = SIG_IGN;
-			sigaction(SIGUSR1, &actignore, NULL);
-		}
-	      #elif defined(HAVE_SIGNAL)
-			signal(SIGUSR1, SIG_IGN);
-	      #endif
-
-		/**
-		 * make sure workers do not muck with pid-file
-		 */
-		if (0 <= pid_fd) {
-			close(pid_fd);
-			pid_fd = -1;
-		}
-		srv->srvconf.pid_file = NULL;
-
-		fdlog_pipes_abandon_pids();
-		srv->pid = getpid();
-		li_rand_reseed();
+	if (srv->srvconf.max_worker > 0) {
+		int rc = server_main_setup_workers(srv, srv->srvconf.max_worker);
+		if (rc != 1) /* 1 for worker; 0 for worker parent done; -1 for error */
+			return rc;
 	}
 #endif
 
@@ -1787,13 +1775,6 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		/* or use the default: we really don't want to hit max-fds */
 		srv->lim_conns = srv->srvconf.max_conns = srv->max_fds/3;
 	}
-
-	/* libev backend overwrites our SIGCHLD handler and calls waitpid on SIGCHLD; we want our own SIGCHLD handling. */
-#ifdef HAVE_SIGACTION
-	sigaction(SIGCHLD, &act, NULL);
-#elif defined(HAVE_SIGNAL)
-	signal(SIGCHLD,  signal_handler);
-#endif
 
 	/*
 	 * kqueue() is called here, select resets its internals,

@@ -75,8 +75,25 @@ src = server.c response.c connections.c h2.c reqpool.c \
 	fdevent_impl.c \
 	http_range.c \
 	data_config.c \
-	vector.c \
 	configfile.c configparser.c
+
+builtin_mods = \
+  mod_rewrite.c \
+  mod_redirect.c \
+  mod_access.c \
+  mod_alias.c \
+  mod_indexfile.c \
+  mod_staticfile.c \
+  mod_setenv.c \
+  mod_expire.c \
+  mod_simple_vhost.c \
+  mod_evhost.c \
+  mod_fastcgi.c \
+  mod_scgi.c
+
+if !LIGHTTPD_STATIC
+src += $(builtin_mods)
+endif
 
 lib_LTLIBRARIES =
 
@@ -107,11 +124,6 @@ mod_maxminddb_la_SOURCES = mod_maxminddb.c
 mod_maxminddb_la_LDFLAGS = $(common_module_ldflags)
 mod_maxminddb_la_LIBADD = $(common_libadd) $(MAXMINDDB_LIB)
 endif
-
-lib_LTLIBRARIES += mod_evasive.la
-mod_evasive_la_SOURCES = mod_evasive.c
-mod_evasive_la_LDFLAGS = $(common_module_ldflags)
-mod_evasive_la_LIBADD = $(common_libadd)
 
 lib_LTLIBRARIES += mod_webdav.la
 mod_webdav_la_SOURCES = mod_webdav.c
@@ -211,11 +223,6 @@ mod_rrdtool_la_SOURCES = mod_rrdtool.c
 mod_rrdtool_la_LDFLAGS = $(common_module_ldflags)
 mod_rrdtool_la_LIBADD = $(common_libadd)
 
-lib_LTLIBRARIES += mod_usertrack.la
-mod_usertrack_la_SOURCES = mod_usertrack.c
-mod_usertrack_la_LDFLAGS = $(common_module_ldflags)
-mod_usertrack_la_LIBADD = $(common_libadd) $(CRYPTO_LIB)
-
 lib_LTLIBRARIES += mod_proxy.la
 mod_proxy_la_SOURCES = mod_proxy.c
 mod_proxy_la_LDFLAGS = $(common_module_ldflags)
@@ -230,16 +237,6 @@ lib_LTLIBRARIES += mod_ssi.la
 mod_ssi_la_SOURCES = mod_ssi.c
 mod_ssi_la_LDFLAGS = $(common_module_ldflags)
 mod_ssi_la_LIBADD = $(common_libadd)
-
-lib_LTLIBRARIES += mod_secdownload.la
-mod_secdownload_la_SOURCES = mod_secdownload.c algo_hmac.c
-mod_secdownload_la_LDFLAGS = $(common_module_ldflags)
-mod_secdownload_la_LIBADD = $(common_libadd) $(CRYPTO_LIB)
-
-#lib_LTLIBRARIES += mod_httptls.la
-#mod_httptls_la_SOURCES = mod_httptls.c
-#mod_httptls_la_LDFLAGS = $(common_module_ldflags)
-#mod_httptls_la_LIBADD = $(common_libadd)
 
 lib_LTLIBRARIES += mod_expire.la
 mod_expire_la_SOURCES = mod_expire.c
@@ -391,11 +388,6 @@ mod_accesslog_la_SOURCES = mod_accesslog.c
 mod_accesslog_la_LDFLAGS = $(common_module_ldflags)
 mod_accesslog_la_LIBADD = $(common_libadd)
 
-lib_LTLIBRARIES += mod_uploadprogress.la
-mod_uploadprogress_la_SOURCES = mod_uploadprogress.c
-mod_uploadprogress_la_LDFLAGS = $(common_module_ldflags)
-mod_uploadprogress_la_LIBADD = $(common_libadd)
-
 lib_LTLIBRARIES += mod_wstunnel.la
 mod_wstunnel_la_SOURCES = mod_wstunnel.c
 mod_wstunnel_la_LDFLAGS = $(common_module_ldflags)
@@ -413,7 +405,7 @@ hdr = base64.h buffer.h burl.h network.h log.h http_kv.h keyvalue.h \
 	http_header.h http_range.h \
 	fdevent.h gw_backend.h connections.h base.h base_decls.h stat_cache.h \
 	plugin.h plugins.h plugin_config.h \
-	http_etag.h array.h vector.h \
+	http_etag.h array.h \
 	fdevent_impl.h network_write.h configfile.h \
 	sock_addr_cache.h \
 	configparser.h \
@@ -450,7 +442,6 @@ lighttpd_SOURCES = \
   mod_cgi.c \
   mod_deflate.c \
   mod_dirlisting.c \
-  mod_evasive.c \
   mod_expire.c \
   mod_extforward.c \
   mod_fastcgi.c \
@@ -460,15 +451,13 @@ lighttpd_SOURCES = \
   mod_rewrite.c \
   mod_rrdtool.c \
   mod_scgi.c \
-  mod_secdownload.c algo_hmac.c \
   mod_setenv.c \
   mod_simple_vhost.c \
+  mod_sockproxy.c \
   mod_ssi.c \
   mod_staticfile.c \
   mod_status.c \
-  mod_uploadprogress.c \
   mod_userdir.c \
-  mod_usertrack.c \
   mod_vhostdb.c \
   mod_vhostdb_api.c \
   mod_webdav.c
@@ -572,13 +561,12 @@ t_test_common_SOURCES = t/test_common.c \
                         ck.c
 t_test_common_LDADD   = $(LIBUNWIND_LIBS) $(PCRE_LIB)
 
-t_test_configfile_SOURCES = t/test_configfile.c buffer.c array.c data_config.c http_header.c http_kv.c vector.c log.c fdlog.c sock_addr.c ck.c
+t_test_configfile_SOURCES = t/test_configfile.c buffer.c array.c data_config.c http_header.c http_kv.c log.c fdlog.c sock_addr.c ck.c
 t_test_configfile_LDADD = $(PCRE_LIB) $(LIBUNWIND_LIBS)
 
 t_test_mod_SOURCES = $(common_src) t/test_mod.c \
                      t/test_mod_access.c \
                      t/test_mod_alias.c \
-                     t/test_mod_evasive.c \
                      t/test_mod_evhost.c \
                      t/test_mod_indexfile.c \
                      t/test_mod_simple_vhost.c \

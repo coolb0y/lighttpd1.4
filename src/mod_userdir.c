@@ -37,7 +37,7 @@ typedef struct {
 } plugin_data;
 
 INIT_FUNC(mod_userdir_init) {
-    return calloc(1, sizeof(plugin_data));
+    return ck_calloc(1, sizeof(plugin_data));
 }
 
 FREE_FUNC(mod_userdir_free) {
@@ -332,6 +332,7 @@ URIHANDLER_FUNC(mod_userdir_docroot_handler) {
 }
 
 
+__attribute_cold__
 int mod_userdir_plugin_init(plugin *p);
 int mod_userdir_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;
