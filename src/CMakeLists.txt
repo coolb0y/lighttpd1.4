@@ -16,7 +16,6 @@ add_definitions(-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LA
 set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "Default value for ``POSITION_INDEPENDENT_CODE`` of targets.")
 
 option(BUILD_JNI_LIB "build JNI shared lib [default: off]")
-option(BUILD_SHARED_LIB "build lighttpd as shared library [default: off]")
 option(WITH_XATTR "with xattr-support for the stat-cache [default: off]")
 option(WITH_MYSQL "with mysql-support for mod_vhostdb_mysql [default: off]")
 option(WITH_PGSQL "with postgres-support for mod_vhostdb_pgsql [default: off]")
@@ -884,7 +883,7 @@ add_executable(lighttpd-angel lighttpd-angel.c)
 set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd-angel)
 add_target_properties(lighttpd-angel COMPILE_FLAGS "-DSBIN_DIR=\\\\\"${CMAKE_INSTALL_FULL_SBINDIR}\\\\\"")
 
-if (BUILD_JNI_LIB OR BUILD_SHARED_LIB)
+if (BUILD_JNI_LIB)
   add_library(lighttpd-common SHARED ${COMMON_SRC})
   add_library(lighttpd SHARED
     server.c

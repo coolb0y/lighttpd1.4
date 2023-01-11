@@ -457,20 +457,6 @@ void li_tohex_uc(char * const restrict buf, size_t buf_len, const char * const r
 	buf[2*s_len] = '\0';
 }
 
-/**
- * @brief Removes a substring from the buffer `b`.
- *
- * @param b Buffer.
- * @param offset Start of the substring to remove.
- * @param len Length of the substring to remove.
- */
-void buffer_substr_remove (buffer * const restrict b, const size_t offset,
-                           const size_t len)
-{
-    const size_t blen = buffer_clen(b);
-    memmove(b->ptr+offset, b->ptr+offset+len, blen-offset-len);
-    buffer_truncate(b, blen-len);
-}
 
 void buffer_substr_replace (buffer * const restrict b, const size_t offset,
                             const size_t len, const buffer * const restrict replace)

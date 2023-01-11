@@ -1,10 +1,6 @@
 #ifndef LI_FIRST_H
 #define LI_FIRST_H
 
-#if defined BUILD_JNI_LIB && defined BUILD_SHARED_LIB
-#   error "BUILD_JNI_LIB and BUILD_SHARED_LIB cannot be used together"
-#endif
-
 #ifdef HAVE_CONFIG_H
 # include "config.h"
 #else

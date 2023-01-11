@@ -212,5 +212,4 @@
 #cmakedefine HAVE_LIBUNWIND
 
 #cmakedefine BUILD_JNI_LIB
-#cmakedefine BUILD_SHARED_LIB
 #cmakedefine LIGHTTPD_STATIC

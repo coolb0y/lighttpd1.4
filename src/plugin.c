@@ -161,8 +161,7 @@ int plugins_load(server *srv) {
 
 	for (uint32_t i = 0; i < srv->srvconf.modules->used; ++i) {
 		const buffer * const module = &((data_string *)srv->srvconf.modules->data[i])->value;
-
-    void *lib = NULL;
+		void *lib = NULL;
 
 		/* check if module is built-in to main executable */
 		buffer_clear(tb);
@@ -190,7 +189,6 @@ int plugins_load(server *srv) {
     #endif // BUILD_JNI_LIB
 
 	  #ifdef _WIN32
-
 		buffer_append_string_len(tb, CONST_STR_LEN(".dll"));
 		if (NULL == (lib = LoadLibrary(tb->ptr))) {
 			log_w32_syserror_2(srv->errh, __FILE__, __LINE__,

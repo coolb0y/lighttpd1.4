@@ -163,9 +163,6 @@ __attribute_pure__
 int buffer_is_equal(const buffer *a, const buffer *b);
 
 __attribute_nonnull__()
-void buffer_substr_remove (buffer * restrict b, size_t offset, size_t len);
-
-__attribute_nonnull__()
 void buffer_substr_replace (buffer * restrict b, size_t offset, size_t len, const buffer * restrict replace);
 
 __attribute_nonnull__()

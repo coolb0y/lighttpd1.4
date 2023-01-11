@@ -2123,6 +2123,7 @@ int main (int argc, char ** argv) {
 
         rc = server_main_setup(srv, argc, argv);
         if (rc > 0) {
+
             #ifdef BUILD_JNI_LIB
               // Here we signal to JNI the server has started.
               jclass ServerClass = (*env)->FindClass(env, "com/lighttpd/Server");
