@@ -100,6 +100,10 @@ static size_t malloc_top_pad;
 #define TEXT_SSL
 #endif
 
+#ifdef BUILD_JNI_LIB
+# include <jni.h>
+#endif
+
 #ifndef __sgi
 /* IRIX doesn't like the alarm based time() optimization */
 /* #define USE_ALARM */
@@ -2052,51 +2056,35 @@ static int main_init_once (void) {
     return 1;
 }
 
-#if defined BUILD_JNI_LIB && defined BUILD_SHARED_LIB
-#   error "BUILD_JNI_LIB and BUILD_SHARED_LIB cannot be used together"
+/** Orders graceful server shutdown in JNI and "Shared Library" modes. */
+#if defined BUILD_JNI_LIB || defined BUILD_SHARED_LIB
+  #ifdef BUILD_JNI_LIB
+  JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown(
+    JNIEnv *env,
+    jobject thisObject
+  ) {
+  #elif defined BUILD_SHARED_LIB
+  void shutdown_lighttpd() {
+  #endif
+    graceful_shutdown = 1;
+  }
 #endif
 
+/**
+ * Entrypoint for server build in different modes (JNI / "Shared Library" /
+ * standalone app).
+ */
 #ifdef BUILD_JNI_LIB
-
-#include <jni.h>
-
-/**
- * @brief Orders graceful server shutdown.
- *
- * @return JNIEXPORT
- */
-JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown(
-  JNIEnv *env,
-  jobject thisObject
-) {
-  graceful_shutdown = 1;
-  srv_shutdown = 1;
-}
-
-/**
- * @brief Entrypoint for Android JNI builds. It starts the server using a single
- * non-JNI specfici parameter: `configPath` - the path to server config.
- *
- * @param env
- * @param thisObject
- * @param configPath Config file path.
- * @return Integer status code.
- */
 JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
     JNIEnv *env,
     jobject thisObject,
     jstring configPath
 ) {
-
 #elif defined BUILD_SHARED_LIB
-
 int launch_lighttpd(const char *config_path, const char *modules_path) {
-
 #else
-
 __attribute_cold__
 int main (int argc, char ** argv) {
-
 #endif
 
     if (!main_init_once()) return -1;
@@ -2141,7 +2129,6 @@ int main (int argc, char ** argv) {
               jmethodID onLaunchedID = (*env)->GetStaticMethodID(env, ServerClass, "onLaunchedCallback", "()V");
               (*env)->CallStaticVoidMethod(env, ServerClass, onLaunchedID);
             #endif
-
             server_main_loop(srv);
 
             if (graceful_shutdown || graceful_restart) {
