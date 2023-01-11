@@ -2057,17 +2057,13 @@ static int main_init_once (void) {
 }
 
 /** Orders graceful server shutdown in JNI and "Shared Library" modes. */
-#if defined BUILD_JNI_LIB || defined BUILD_SHARED_LIB
-  #ifdef BUILD_JNI_LIB
-  JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown(
-    JNIEnv *env,
-    jobject thisObject
-  ) {
-  #elif defined BUILD_SHARED_LIB
-  void shutdown_lighttpd() {
-  #endif
-    graceful_shutdown = 1;
-  }
+#if defined BUILD_JNI_LIB
+JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown(
+  JNIEnv *env,
+  jobject thisObject
+) {
+  graceful_shutdown = 1;
+}
 #endif
 
 /**
@@ -2080,8 +2076,6 @@ JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
     jobject thisObject,
     jstring configPath
 ) {
-#elif defined BUILD_SHARED_LIB
-int launch_lighttpd(const char *config_path, const char *modules_path) {
 #else
 __attribute_cold__
 int main (int argc, char ** argv) {
@@ -2093,14 +2087,12 @@ int main (int argc, char ** argv) {
     // BEWARE: Before exit from this function do not forget to release this
     // string via a call to JNI's ReleaseStringUTFChars function.
     const char *config_path = (*env)->GetStringUTFChars(env, configPath, 0);
-    #endif
 
-    #if defined BUILD_JNI_LIB || defined BUILD_SHARED_LIB
-    // For builds producing shared libraries, we take expose programmatically-
-    // friendly arguments from special versions of entry point functions,
-    // replacing main() intended for CLI interface, and here we just translate
-    // those programmatically-friendly arguments to corresponding CLI params,
-    // thus eliminating any need to alter the rest of server start-up code.
+    // For JNI build, we take expose programmatically-friendly arguments from
+    // special version of entry point functions, replacing main() intended for
+    // CLI interface, and here we just translate those arguments
+    // to corresponding CLI params, thus eliminating any need to alter the rest
+    // of server start-up code.
     char *argv[6];
     argv[0] = "";
     argv[1] = "-D";
