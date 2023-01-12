@@ -15,6 +15,7 @@ add_definitions(-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LA
 # default to ON
 set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "Default value for ``POSITION_INDEPENDENT_CODE`` of targets.")
 
+option(BUILD_ANDROID_NDK_LOGGING "adds logging via Android NDK [default: off]")
 option(BUILD_JNI_LIB "build JNI shared lib [default: off]")
 option(WITH_XATTR "with xattr-support for the stat-cache [default: off]")
 option(WITH_MYSQL "with mysql-support for mod_vhostdb_mysql [default: off]")
@@ -883,56 +884,35 @@ add_executable(lighttpd-angel lighttpd-angel.c)
 set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd-angel)
 add_target_properties(lighttpd-angel COMPILE_FLAGS "-DSBIN_DIR=\\\\\"${CMAKE_INSTALL_FULL_SBINDIR}\\\\\"")
 
-if (BUILD_JNI_LIB)
-  add_library(lighttpd-common SHARED ${COMMON_SRC})
-  add_library(lighttpd SHARED
-    server.c
-    response.c
-    connections.c
-    h2.c
-    reqpool.c
-    plugin.c
-    sock_addr_cache.c
-    ls-hpack/lshpack.c
-    algo_xxhash.c
-    fdevent_impl.c
-    http_range.c
-    network.c
-    network_write.c
-    data_config.c
-    configfile.c
-    configparser.c
-    ${BUILTIN_MODS}
-  )
-  target_link_libraries(lighttpd lighttpd-common)
-else()
-  add_executable(lighttpd
-    server.c
-    response.c
-    connections.c
-    h2.c
-    reqpool.c
-    plugin.c
-    sock_addr_cache.c
-    ls-hpack/lshpack.c
-    algo_xxhash.c
-    fdevent_impl.c
-    http_range.c
-    network.c
-    network_write.c
-    data_config.c
-    configfile.c
-    configparser.c
-    ${COMMON_SRC}
-    ${BUILTIN_MODS}
-  )
-  set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
-endif()
+set(CORE_SRC
+	server.c
+	response.c
+	connections.c
+	h2.c
+	reqpool.c
+	plugin.c
+	sock_addr_cache.c
+	ls-hpack/lshpack.c
+	algo_xxhash.c
+	fdevent_impl.c
+	http_range.c
+	network.c
+	network_write.c
+	data_config.c
+	configfile.c
+	configparser.c
+)
 
-if (BUILD_JNI_LIB)
-  # Links against log library from Android NDK.
-  target_link_libraries(lighttpd-common log)
-  target_link_libraries(lighttpd log)
+if(BUILD_JNI_LIB)
+	add_library(lighttpd-common SHARED ${COMMON_SRC})
+	add_library(lighttpd SHARED	${CORE_SRC} ${BUILTIN_MODS})
+	target_link_libraries(lighttpd lighttpd-common)
+	if(BUILD_ANDROID_NDK_LOGGING)
+		target_link_libraries(lighttpd-common log)
+	endif()
+else()
+	add_executable(lighttpd ${CORE_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
+	set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
 endif()
 
 add_and_install_library(mod_access mod_access.c)
@@ -1014,11 +994,6 @@ add_test(NAME test_common COMMAND test_common)
 
 if(HAVE_PCRE)
 	target_link_libraries(lighttpd ${PCRE_LDFLAGS})
-  if (BUILD_JNI_LIB)
-    # For older Android NDK versions PCRE2 library has to be built from sources,
-    # thus linking against it.
-    target_link_libraries(lighttpd-common ${PCRE_LDFLAGS})
-  endif()
 	add_target_properties(lighttpd COMPILE_FLAGS ${PCRE_CFLAGS})
 	target_link_libraries(test_common ${PCRE_LDFLAGS})
 	add_target_properties(test_common COMPILE_FLAGS ${PCRE_CFLAGS})
@@ -1026,6 +1001,9 @@ if(HAVE_PCRE)
 	add_target_properties(test_configfile COMPILE_FLAGS ${PCRE_CFLAGS})
 	target_link_libraries(test_mod ${PCRE_LDFLAGS})
 	add_target_properties(test_mod COMPILE_FLAGS ${PCRE_CFLAGS})
+	if(BUILD_JNI_LIB)
+		target_link_libraries(lighttpd-common ${PCRE_LDFLAGS})
+	endif()
 endif()
 
 if(WITH_LUA)
@@ -1165,10 +1143,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
 endif()
 
 if(BUILD_JNI_LIB)
-  # On Android native code is build with this flag which forbids undefined
-  # function references, thus requring to correctly link all outputs against
-  # shared libraries.
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+	set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
 endif()
 
 set_target_properties(lighttpd PROPERTIES CMAKE_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})

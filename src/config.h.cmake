@@ -211,5 +211,6 @@
 /* libunwind */
 #cmakedefine HAVE_LIBUNWIND
 
+#cmakedefine BUILD_ANDROID_NDK_LOGGING
 #cmakedefine BUILD_JNI_LIB
 #cmakedefine LIGHTTPD_STATIC

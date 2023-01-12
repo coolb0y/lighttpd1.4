@@ -5,11 +5,11 @@
 
 #include "first.h"
 
-#ifdef BUILD_JNI_LIB
-// For JNI build we implement logging with use of Android NDK methods.
-// See: https://developer.android.com/ndk/reference/group/logging
+#ifdef BUILD_ANDROID_NDK_LOGGING
+/* Android NDK logging library.
+ * See: https://developer.android.com/ndk/reference/group/logging */
 # include <android/log.h>
-#endif // BUILD_JNI_LIB
+#endif
 
 #include "log.h"
 
@@ -237,9 +237,9 @@ __attribute_nonnull__()
 static void
 log_error_write (const log_error_st * const errh, buffer * const restrict b)
 {
-#   ifdef BUILD_JNI_LIB
+    #ifdef BUILD_ANDROID_NDK_LOGGING
     __android_log_print(ANDROID_LOG_ERROR, "Lighttpd", "%s", b->ptr);
-#   endif // BUILD_JNI_LIB
+    #endif
     if (errh->mode != FDLOG_SYSLOG) { /* FDLOG_FD FDLOG_FILE FDLOG_PIPE */
         buffer_append_char(b, '\n');
         write_all(errh->fd, BUF_PTR_LEN(b));

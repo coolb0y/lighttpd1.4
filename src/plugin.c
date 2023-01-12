@@ -89,6 +89,12 @@ log_w32_syserror_2 (log_error_st *const errh, const char *file, const int line, 
 }
 #endif
 
+/**
+ *
+ *
+ *
+ */
+
 #if defined(LIGHTTPD_STATIC)
 
 /* pre-declare functions, as there is no header for them */
@@ -175,18 +181,14 @@ int plugins_load(server *srv) {
 	  #endif
 
 	  if (NULL == init) {
-
-    #ifdef BUILD_JNI_LIB
-      // In JNI use case modules are packed alongside other app's shared
-      // libraries, and thus we need to refer the library by name, rather
-      // than by path, and let OS find the correct library path (especially
-      // as libraries might be kept within APK bundle, and loaded directly
-      // from it by OS).
-      buffer_copy_string(tb, module->ptr);
-    #else
-      buffer_copy_string(tb, srv->srvconf.modules_dir);
-      buffer_append_path_len(tb, BUF_PTR_LEN(module));
-    #endif // BUILD_JNI_LIB
+		#ifdef BUILD_JNI_LIB
+		/* With Android in mind: we don't know module URL, but OS will find it
+		 * by name within shared library folder of APK. */
+		buffer_copy_string(tb, module->ptr);
+		#else
+		buffer_copy_string(tb, srv->srvconf.modules_dir);
+		buffer_append_path_len(tb, BUF_PTR_LEN(module));
+		#endif
 
 	  #ifdef _WIN32
 		buffer_append_string_len(tb, CONST_STR_LEN(".dll"));

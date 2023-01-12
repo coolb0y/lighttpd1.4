@@ -100,10 +100,6 @@ static size_t malloc_top_pad;
 #define TEXT_SSL
 #endif
 
-#ifdef BUILD_JNI_LIB
-# include <jni.h>
-#endif
-
 #ifndef __sgi
 /* IRIX doesn't like the alarm based time() optimization */
 /* #define USE_ALARM */
@@ -1264,12 +1260,6 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	/*pid_fd = -1;*/
 	srv->argv = argv;
 
-  // Resets getopt(), to parse arguments starting from the first one,
-  // rather than after the last one parsed in a previous last getopt()
-  // invokation within the program. It is relevant to the shared library
-  // use case.
-  optind = 1;
-
 	for (int o; -1 != (o = getopt(argc, argv, "f:m:i:hvVD1pt")); ) {
 		switch(o) {
 		case 'f':
@@ -2056,52 +2046,11 @@ static int main_init_once (void) {
     return 1;
 }
 
-/** Orders graceful server shutdown in JNI and "Shared Library" modes. */
-#if defined BUILD_JNI_LIB
-JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown(
-  JNIEnv *env,
-  jobject thisObject
-) {
-  graceful_shutdown = 1;
-}
-#endif
+void signal_server_ready (void * env);
 
-/**
- * Entrypoint for server build in different modes (JNI / "Shared Library" /
- * standalone app).
- */
-#ifdef BUILD_JNI_LIB
-JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
-    JNIEnv *env,
-    jobject thisObject,
-    jstring configPath
-) {
-#else
 __attribute_cold__
-int main (int argc, char ** argv) {
-#endif
-
+int main_core (int argc, char ** argv, void * env) {
     if (!main_init_once()) return -1;
-
-    #ifdef BUILD_JNI_LIB
-    // BEWARE: Before exit from this function do not forget to release this
-    // string via a call to JNI's ReleaseStringUTFChars function.
-    const char *config_path = (*env)->GetStringUTFChars(env, configPath, 0);
-
-    // For JNI build, we take expose programmatically-friendly arguments from
-    // special version of entry point functions, replacing main() intended for
-    // CLI interface, and here we just translate those arguments
-    // to corresponding CLI params, thus eliminating any need to alter the rest
-    // of server start-up code.
-    char *argv[6];
-    argv[0] = "";
-    argv[1] = "-D";
-    int argc = 2;
-    if (config_path) {
-      argv[argc++] = "-f";
-      argv[argc++] = config_path;
-    }
-    #endif
 
     int rc;
 
@@ -2116,12 +2065,7 @@ int main (int argc, char ** argv) {
         rc = server_main_setup(srv, argc, argv);
         if (rc > 0) {
 
-            #ifdef BUILD_JNI_LIB
-              // Here we signal to JNI the server has started.
-              jclass ServerClass = (*env)->FindClass(env, "com/lighttpd/Server");
-              jmethodID onLaunchedID = (*env)->GetStaticMethodID(env, ServerClass, "onLaunchedCallback", "()V");
-              (*env)->CallStaticVoidMethod(env, ServerClass, onLaunchedID);
-            #endif
+            signal_server_ready(env);
             server_main_loop(srv);
 
             if (graceful_shutdown || graceful_restart) {
@@ -2164,9 +2108,53 @@ int main (int argc, char ** argv) {
         while (fdevent_waitpid(-1, NULL, 0) > 0) ;
     } while (graceful_restart);
 
-    #ifdef BUILD_JNI_LIB
-    (*env)->ReleaseStringUTFChars(env, configPath, config_path);
-    #endif
-
     return rc;
 }
+
+#ifdef BUILD_JNI_LIB
+# include <jni.h>
+
+/* JNI: Callback to Java to signal the server is up and running. */
+void signal_server_ready (void * env) {
+    JNIEnv *e = env;
+    jclass ServerClass = (*e)->FindClass(e, "com/lighttpd/Server");
+    jmethodID onLaunchedID = (*e)->GetStaticMethodID(e, ServerClass, "onLaunchedCallback", "()V");
+    (*e)->CallStaticVoidMethod(e, ServerClass, onLaunchedID);
+}
+
+/* JNI: Launches the server. */
+JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(JNIEnv *env, jobject thisObject, jstring configPath)
+{
+    const char *config_path = (*env)->GetStringUTFChars(env, configPath, 0);
+
+    int argc = 4;
+    char *argv[5];
+    argv[0] = "";
+    argv[1] = "-D";
+    argv[2] = "-f";
+    argv[3] = config_path;
+    argv[4] = 0;
+    optind = 1;
+
+    main_core(argc, argv, env);
+
+    (*env)->ReleaseStringUTFChars(env, configPath, config_path);
+}
+
+/* JNI: Triggers graceful server shutdown. */
+JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown (JNIEnv *env, jobject thisObject)
+{
+    graceful_shutdown = 1;
+}
+
+#else
+
+__attribute_cold__
+void signal_server_ready (void * env) {}
+
+__attribute_cold__
+int main (int argc, char ** argv) {
+    return main_core(argc, argv, 0);
+}
+
+#endif
