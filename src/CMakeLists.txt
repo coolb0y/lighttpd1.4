@@ -875,17 +875,18 @@ endif()
 
 if(CMAKE_CROSSCOMPILING)
 	# custom compile lemon using native compiler
-	# TODO: When cross-compiling for iOS, this compilation of lemon for build host
-	# seems to fail without additional arguments provided (every argument starting
-	# from the second line of ARGS section). I guess, now with these arguments
-	# the build will for Android, and this should be reworked further.
+	if(CMAKE_SYSTEM_NAME MATCHES "iOS")
+		set(LEMON_BUILD_FLAGS
+			"-target ${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx
+			-isysroot \$(xcrun --sdk macosx --show-sdk-path)
+			-I \$(xcrun --sdk macosx --show-sdk-path)/usr/include
+			-L \$(xcrun --sdk macosx --show-sdk-path)/usr/lib"
+		)
+	endif()
 	add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lemon
 		COMMAND cc
 		ARGS    ${CMAKE_CURRENT_SOURCE_DIR}/lemon.c -o ${CMAKE_CURRENT_BINARY_DIR}/lemon
-			-target ${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx
-			-isysroot "$(xcrun" --sdk macosx "--show-sdk-path)"
-			-I "$(xcrun" --sdk macosx "--show-sdk-path)/usr/include"
-			-L "$(xcrun" --sdk macosx "--show-sdk-path)/usr/lib"
+			${LEMON_BUILD_FLAGS}
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/lemon.c
 		COMMENT "Generating lemon from lemon.c using native compiler"
 	)
