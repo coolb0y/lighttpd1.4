@@ -43,7 +43,7 @@
     is invoked, and the very same server in the same host app works fine when
     these flags are commented out, thus without sendfile(). Sure, it should be
     correctly handled in CMakeList.txt configuration step.
-    cmakedefine  HAVE_SYS_SENDFILE_H */
+    cmakedefine  HAVE_SYS_SENDFILE_H
 */
 #cmakedefine  HAVE_SYS_SELECT_H
 #cmakedefine  HAVE_SYS_TYPES_H
