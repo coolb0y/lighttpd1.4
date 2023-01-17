@@ -35,7 +35,11 @@
 
 /* for solaris 2.5 and NetBSD 1.3.x */
 #ifndef HAVE_SOCKLEN_T
-typedef int socklen_t;
+// TODO: On iOS it is defined in /SDKs/iPhoneOS16.2.sdk/usr/include/sys/_types/_socklen_t.h
+// and thus static build fails as somehow current build system does not find it.
+// typedef int socklen_t;
+// Might be a similar problem to timegm() in time.h
+// Will look into it later.
 #endif
 
 #ifndef SHUT_WR

@@ -16,6 +16,7 @@ add_definitions(-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LA
 set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "Default value for ``POSITION_INDEPENDENT_CODE`` of targets.")
 
 option(BUILD_ANDROID_NDK_LOGGING "adds logging via Android NDK [default: off]")
+option(BUILD_LIBRARY "build Lighttpd as library rather than executable [default: off]")
 option(BUILD_JNI_LIB "build JNI shared lib [default: off]")
 option(WITH_XATTR "with xattr-support for the stat-cache [default: off]")
 option(WITH_MYSQL "with mysql-support for mod_vhostdb_mysql [default: off]")
@@ -865,9 +866,17 @@ endif()
 
 if(CMAKE_CROSSCOMPILING)
 	# custom compile lemon using native compiler
+	# TODO: When cross-compiling for iOS, this compilation of lemon for build host
+	# seems to fail without additional arguments provided (every argument starting
+	# from the second line of ARGS section). I guess, now with these arguments
+	# the build will for Android, and this should be reworked further.
 	add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lemon
 		COMMAND cc
 		ARGS    ${CMAKE_CURRENT_SOURCE_DIR}/lemon.c -o ${CMAKE_CURRENT_BINARY_DIR}/lemon
+			-target ${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx
+			-isysroot "$(xcrun" --sdk macosx "--show-sdk-path)"
+			-I "$(xcrun" --sdk macosx "--show-sdk-path)/usr/include"
+			-L "$(xcrun" --sdk macosx "--show-sdk-path)/usr/lib"
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/lemon.c
 		COMMENT "Generating lemon from lemon.c using native compiler"
 	)
@@ -910,6 +919,8 @@ if(BUILD_JNI_LIB)
 	if(BUILD_ANDROID_NDK_LOGGING)
 		target_link_libraries(lighttpd-common log)
 	endif()
+elseif(BUILD_LIBRARY)
+	add_library(lighttpd ${COMMON_SRC} ${CORE_SRC} ${BUILTIN_MODS})
 else()
 	add_executable(lighttpd ${CORE_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
 	set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)

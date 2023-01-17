@@ -2147,6 +2147,29 @@ JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown (JNIEnv *env, jobject t
     graceful_shutdown = 1;
 }
 
+#elif defined(BUILD_LIBRARY)
+
+void signal_server_ready (void * env) {
+	void (*cb)() = env;
+	cb();
+}
+
+int lighttpd_server_launch(const char * config_path, void (*cb)()) {
+	int argc = 4;
+	char *argv[5];
+	argv[0] = "";
+	argv[1] = "-D";
+	argv[2] = "-f";
+	argv[3] = config_path;
+	argv[4] = 0;
+	optind = 1;
+	return main_core(argc, argv, cb);
+}
+
+void lighttpd_server_graceful_shutdown() {
+  graceful_shutdown = 1;
+}
+
 #else
 
 __attribute_cold__

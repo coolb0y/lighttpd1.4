@@ -36,7 +36,15 @@
 #cmakedefine  HAVE_SYS_PRCTL_H
 #cmakedefine  HAVE_SYS_PROCCTL_H
 #cmakedefine  HAVE_SYS_RESOURCE_H
-#cmakedefine  HAVE_SYS_SENDFILE_H
+/*
+    TODO: Here, and below various definitions related to sendfile are commented
+    out because it seems on iOS sendfile(), although present, does not work
+    correctly. At least for me the server crashes with SISSYG when sendfile()
+    is invoked, and the very same server in the same host app works fine when
+    these flags are commented out, thus without sendfile(). Sure, it should be
+    correctly handled in CMakeList.txt configuration step.
+    cmakedefine  HAVE_SYS_SENDFILE_H */
+*/
 #cmakedefine  HAVE_SYS_SELECT_H
 #cmakedefine  HAVE_SYS_TYPES_H
 #cmakedefine  HAVE_SYS_UIO_H
@@ -184,10 +192,12 @@
 #cmakedefine  HAVE_PWRITE
 #cmakedefine  HAVE_PWRITEV
 #cmakedefine  HAVE_SELECT
-#cmakedefine  HAVE_SENDFILE
-#cmakedefine  HAVE_SEND_FILE
-#cmakedefine  HAVE_SENDFILE64
-#cmakedefine  HAVE_SENDFILEV
+/*
+    cmakedefine  HAVE_SENDFILE
+    cmakedefine  HAVE_SEND_FILE
+    cmakedefine  HAVE_SENDFILE64
+    cmakedefine  HAVE_SENDFILEV
+*/
 #cmakedefine  HAVE_SETPFLAGS
 #cmakedefine  HAVE_SIGACTION
 #cmakedefine  HAVE_SIGNAL
@@ -213,4 +223,5 @@
 
 #cmakedefine BUILD_ANDROID_NDK_LOGGING
 #cmakedefine BUILD_JNI_LIB
+#cmakedefine BUILD_LIBRARY
 #cmakedefine LIGHTTPD_STATIC

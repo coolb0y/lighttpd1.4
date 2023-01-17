@@ -28,6 +28,11 @@
 #define gmtime_r(timep,result)    ((*(result) = *(gmtime(timep))),    (result))
 #endif
 
+/*
+    NOTE: It seems in cross-compilation for iOS it does not find timegm()
+    present in iOS SDK inside ../SDKs/iPhoneOS16.2.sdk/usr/include/time.h
+    Thus, commenting this out for now, and will figure out the issue and
+    return it later.
 #ifndef HAVE_TIMEGM
 #ifdef _WIN32
 #define timegm(tm) _mkgmtime(tm)
@@ -42,7 +47,7 @@ timegm (const struct tm * const tm)
     int m = tm->tm_mon + 1;
     int d = tm->tm_mday;
 
-    /* days_from_civil() http://howardhinnant.github.io/date_algorithms.html */
+    /* days_from_civil() http://howardhinnant.github.io/date_algorithms.html *//*
     y -= m <= 2;
     int era = y / 400;
     int yoe = y - era * 400;                                   // [0, 399]
@@ -54,7 +59,7 @@ timegm (const struct tm * const tm)
 }
 #endif
 #endif
-
+*/
 
 /* non-standard functions created for lighttpd for Y2038 problem
  * reference: https://en.wikipedia.org/wiki/Year_2038_problem
