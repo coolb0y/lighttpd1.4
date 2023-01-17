@@ -18,6 +18,7 @@
 #cmakedefine  HAVE_INTTYPES_H
 #cmakedefine  HAVE_LINUX_RANDOM_H
 #cmakedefine  HAVE_MALLOC_H
+#cmakedefine  HAVE_NETINET_TCP_FSM_H
 #cmakedefine  HAVE_POLL_H
 #cmakedefine  HAVE_PORT_H
 #cmakedefine  HAVE_PRIV_H

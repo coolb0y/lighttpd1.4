@@ -537,10 +537,7 @@ int fdevent_connect_status(int fd) {
 #if (defined(__APPLE__) && defined(__MACH__)) \
   || defined(__FreeBSD__) || defined(__NetBSD__) \
   || defined(__OpenBSD__) || defined(__DragonFly__)
-// TODO: This is done for cross-compilation for iOS. I guess, it should be done
-// diferently in future.
-// #include <netinet/tcp_fsm.h>
-#include "tcp_fsm.h"
+#include "netinet-tcp_fsm.h"
 #endif
 
 /* fd must be TCP socket (AF_INET, AF_INET6), end-of-stream recv() 0 bytes */

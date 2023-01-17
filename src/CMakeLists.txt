@@ -105,6 +105,7 @@ if(WITH_WEBDAV_LOCKS)
 	set(WITH_UUID 1)
 endif()
 
+check_include_files(netinet/tcp_fsm.h HAVE_NETINET_TCP_FSM_H)
 check_include_files(sys/inotify.h HAVE_SYS_INOTIFY_H)
 set(CMAKE_REQUIRED_FLAGS "-include sys/time.h")
 check_include_files(sys/loadavg.h HAVE_SYS_LOADAVG_H)

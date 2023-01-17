@@ -1,7 +1,3 @@
-// TODO: This is temporary added to fix cross-compilation for iOS
-// (tcp_fsm.h is not a part of iOS SDK). I guess, this inclusion should
-// be done in a cleaner way, configured by CMake.
-
 /*-
  * Copyright (c) 1982, 1986, 1993
  *	The Regents of the University of California.
@@ -35,7 +31,9 @@
  * $FreeBSD$
  */
 
-#ifndef _NETINET_TCP_FSM_H_
+#ifdef HAVE_NETINET_TCP_FSM_H
+#include <netinet/tcp_fsm.h>
+#elif !defined(_NETINET_TCP_FSM_H_)
 #define	_NETINET_TCP_FSM_H_
 
 /*
