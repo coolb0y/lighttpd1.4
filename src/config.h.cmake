@@ -213,7 +213,7 @@
 /* libunwind */
 #cmakedefine HAVE_LIBUNWIND
 
-#cmakedefine BUILD_ANDROID_NDK_LOGGING
-#cmakedefine BUILD_JNI_LIB
 #cmakedefine BUILD_LIBRARY
 #cmakedefine LIGHTTPD_STATIC
+#cmakedefine WITH_ANDROID_NDK_SYSLOG_INTERCEPT
+#cmakedefine WITH_JAVA_NATIVE_INTERFACE

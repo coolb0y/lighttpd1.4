@@ -2046,10 +2046,12 @@ static int main_init_once (void) {
     return 1;
 }
 
-void signal_server_ready (void * env);
+#ifdef BUILD_LIBRARY
+# include "library-wrap.h"
+#endif
 
 __attribute_cold__
-int main_core (int argc, char ** argv, void * env) {
+int main (int argc, char ** argv) {
     if (!main_init_once()) return -1;
 
     int rc;
@@ -2065,7 +2067,6 @@ int main_core (int argc, char ** argv, void * env) {
         rc = server_main_setup(srv, argc, argv);
         if (rc > 0) {
 
-            signal_server_ready(env);
             server_main_loop(srv);
 
             if (graceful_shutdown || graceful_restart) {
@@ -2110,74 +2111,3 @@ int main_core (int argc, char ** argv, void * env) {
 
     return rc;
 }
-
-#ifdef BUILD_JNI_LIB
-# include <jni.h>
-
-/* JNI: Callback to Java to signal the server is up and running. */
-void signal_server_ready (void * env) {
-    JNIEnv *e = env;
-    jclass ServerClass = (*e)->FindClass(e, "com/lighttpd/Server");
-    jmethodID onLaunchedID = (*e)->GetStaticMethodID(e, ServerClass, "onLaunchedCallback", "()V");
-    (*e)->CallStaticVoidMethod(e, ServerClass, onLaunchedID);
-}
-
-/* JNI: Launches the server. */
-JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(JNIEnv *env, jobject thisObject, jstring configPath)
-{
-    const char *config_path = (*env)->GetStringUTFChars(env, configPath, 0);
-
-    int argc = 4;
-    char *argv[5];
-    argv[0] = "";
-    argv[1] = "-D";
-    argv[2] = "-f";
-    argv[3] = config_path;
-    argv[4] = 0;
-    optind = 1;
-
-    main_core(argc, argv, env);
-
-    (*env)->ReleaseStringUTFChars(env, configPath, config_path);
-}
-
-/* JNI: Triggers graceful server shutdown. */
-JNIEXPORT void JNICALL Java_com_lighttpd_Server_shutdown (JNIEnv *env, jobject thisObject)
-{
-    graceful_shutdown = 1;
-}
-
-#elif defined(BUILD_LIBRARY)
-
-void signal_server_ready (void * env) {
-	void (*cb)() = env;
-	cb();
-}
-
-int lighttpd_server_launch(const char * config_path, void (*cb)()) {
-	int argc = 4;
-	char *argv[5];
-	argv[0] = "";
-	argv[1] = "-D";
-	argv[2] = "-f";
-	argv[3] = config_path;
-	argv[4] = 0;
-	optind = 1;
-	return main_core(argc, argv, cb);
-}
-
-void lighttpd_server_graceful_shutdown() {
-  graceful_shutdown = 1;
-}
-
-#else
-
-__attribute_cold__
-void signal_server_ready (void * env) {}
-
-__attribute_cold__
-int main (int argc, char ** argv) {
-    return main_core(argc, argv, 0);
-}
-
-#endif

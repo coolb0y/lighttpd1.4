@@ -181,14 +181,8 @@ int plugins_load(server *srv) {
 	  #endif
 
 	  if (NULL == init) {
-		#ifdef BUILD_JNI_LIB
-		/* With Android in mind: we don't know module URL, but OS will find it
-		 * by name within shared library folder of APK. */
-		buffer_copy_string(tb, module->ptr);
-		#else
 		buffer_copy_string(tb, srv->srvconf.modules_dir);
 		buffer_append_path_len(tb, BUF_PTR_LEN(module));
-		#endif
 
 	  #ifdef _WIN32
 		buffer_append_string_len(tb, CONST_STR_LEN(".dll"));
