@@ -222,6 +222,10 @@ check_function_exists(sendfilev HAVE_SENDFILEV)
 check_function_exists(setpflags HAVE_SETPFLAGS)
 endif()
 
+if(CMAKE_SYSTEM_NAME MATCHES "iOS")
+	set(HAVE_SENDFILE_BROKEN 1)
+endif()
+
 check_type_size(long SIZEOF_LONG)
 check_type_size(off_t SIZEOF_OFF_T)
 
