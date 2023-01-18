@@ -53,9 +53,9 @@ void syslog(int priority, const char *format, ...)
 
 #include <jni.h>
 
-int lighttpd_jni_main (int argc, const char ** argv, JNIEnv *jenv);
+int lighttpd_jni_main (int argc, char ** argv, JNIEnv *jenv);
 #define main(a,b) \
-  lighttpd_jni_main (int argc, const char ** argv, JNIEnv *jenv)
+  lighttpd_jni_main (int argc, char ** argv, JNIEnv *jenv)
 
 static void lighttpd_jni_main_loop (server * const srv, JNIEnv *jenv)
 {
@@ -78,11 +78,11 @@ JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
 ) {
     UNUSED(thisObject);
 
-    const char *config_path = (*jenv)->GetStringUTFChars(jenv, configPath, 0);
+    const char * config_path = (*jenv)->GetStringUTFChars(jenv, configPath, 0);
     if (!config_path) return -1;
 
     optind = 1;
-    const char *argv[] = { "lighttpd", "-D", "-f", config_path, NULL };
+    char *argv[] = { "lighttpd", "-D", "-f", (char*)config_path, NULL };
     int rc = lighttpd_jni_main(4, argv, jenv);
 
     (*jenv)->ReleaseStringUTFChars(jenv, configPath, config_path);
@@ -101,9 +101,9 @@ JNIEXPORT void JNICALL Java_com_lighttpd_Server_graceful_shutdown(
 
 #else
 
-int lighttpd_main (int argc, const char ** argv, void (*callback)());
+int lighttpd_main (int argc, char ** argv, void (*callback)());
 #define main(a,b) \
-  lighttpd_main (int argc, const char ** argv, void (*callback)())
+  lighttpd_main (int argc, char ** argv, void (*callback)())
 
 static void lighttpd_main_loop (server * const srv, void (*callback)())
 {
@@ -117,7 +117,7 @@ int lighttpd_launch(const char * config_path, void (*callback)()) {
     if (!config_path) return -1;
 
     optind = 1;
-    const char *argv[] = { "lighttpd", "-D", "-f", config_path, NULL };
+    char *argv[] = { "lighttpd", "-D", "-f", (char*)config_path, NULL };
 	return lighttpd_main(4, argv, callback);
 }
 
