@@ -90,7 +90,7 @@ JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
 }
 
 __attribute_cold__
-JNIEXPORT void JNICALL Java_com_lighttpd_Server_graceful_shutdown(
+JNIEXPORT void JNICALL Java_com_lighttpd_Server_gracefulShutdown(
     JNIEnv *jenv,
     jobject thisObject
 ) {
