@@ -876,11 +876,16 @@ endif()
 if(CMAKE_CROSSCOMPILING)
 	# custom compile lemon using native compiler
 	if(CMAKE_SYSTEM_NAME MATCHES "iOS")
+		execute_process(
+			COMMAND xcrun --sdk macosx --show-sdk-path
+			OUTPUT_VARIABLE MACOSX_SDK_PATH
+		)
+		string(REPLACE "\n" "" MACOSX_SDK_PATH ${MACOSX_SDK_PATH})
 		set(LEMON_BUILD_FLAGS
-			"-target ${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx
-			-isysroot \$(xcrun --sdk macosx --show-sdk-path)
-			-I \$(xcrun --sdk macosx --show-sdk-path)/usr/include
-			-L \$(xcrun --sdk macosx --show-sdk-path)/usr/lib"
+			--target=${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx
+			-isysroot ${MACOSX_SDK_PATH}
+			-I ${MACOSX_SDK_PATH}/usr/include
+			-L ${MACOSX_SDK_PATH}/usr/lib
 		)
 	endif()
 	add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lemon
@@ -889,6 +894,8 @@ if(CMAKE_CROSSCOMPILING)
 			${LEMON_BUILD_FLAGS}
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/lemon.c
 		COMMENT "Generating lemon from lemon.c using native compiler"
+		VERBATIM
+		COMMAND_EXPAND_LISTS
 	)
 else()
 	add_executable(lemon lemon.c)
