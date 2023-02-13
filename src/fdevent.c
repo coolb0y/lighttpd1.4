@@ -1,8 +1,6 @@
 #include "first.h"
 
 #include "fdevent.h"
-#include "buffer.h"
-#include "log.h"
 
 #include <sys/types.h>
 #include "sys-socket.h"
@@ -19,6 +17,9 @@
 #include <share.h>      /* _SH_DENYRW */
 #include <winsock2.h>
 #endif
+
+#include "ck.h"
+#define force_assert(x) ck_assert(x)
 
 #ifdef SOCK_CLOEXEC
 static int use_sock_cloexec;
@@ -171,10 +172,6 @@ int fdevent_dup_cloexec (int fd) {
 #endif
 
 int fdevent_open_cloexec(const char *pathname, int symlinks, int flags, mode_t mode) {
-#ifdef __CYGWIN__ /* broken in current cygwin; fixed in cygwin test */
-#undef  O_NOFOLLOW
-#define O_NOFOLLOW 0
-#endif
 	if (!symlinks) flags |= O_NOFOLLOW;
 #ifdef O_CLOEXEC
 	return open(pathname, flags | O_CLOEXEC | FDEVENT_O_FLAGS, mode);
@@ -282,6 +279,20 @@ int fdevent_mkostemp(char *path, int flags) {
  #endif
 }
 
+
+/* accept4() added in Linux x86 in kernel 2.6.28, but not in arm until 2.6.36
+ * https://lwn.net/Articles/789961/ */
+#if defined(__linux__) \
+ && (defined(__arm__) || defined(__thumb__) || defined(__arm64__))
+#ifdef __has_include
+#if __has_include(<sys/syscall.h>)
+#include <sys/syscall.h>
+#endif
+#endif
+#ifndef SYS_accept4
+#define accept4(a,b,c,d) ((errno = ENOTSUP), -1)
+#endif
+#endif
 
 int fdevent_accept_listenfd(int listenfd, struct sockaddr *addr, size_t *addrlen) {
 	int fd;
@@ -437,6 +448,7 @@ pid_t fdevent_fork_execve(const char *name, char *argv[], char *envp[], int fdin
     signal(SIGTSTP, SIG_DFL);
   #endif
     signal(SIGPIPE, SIG_DFL);
+    signal(SIGUSR1, SIG_DFL);
 
     execve(name, argv, envp ? envp : environ);
 
@@ -534,10 +546,17 @@ int fdevent_connect_status(int fd) {
 
 
 #include <netinet/tcp.h>
-#if (defined(__APPLE__) && defined(__MACH__)) \
-  || defined(__FreeBSD__) || defined(__NetBSD__) \
+#if  defined(__FreeBSD__) || defined(__NetBSD__) \
   || defined(__OpenBSD__) || defined(__DragonFly__)
 #include "netinet-tcp_fsm.h"
+#endif
+#if defined(__APPLE__) && defined(__MACH__)
+#include <TargetConditionals.h> /* TARGET_OS_IPHONE, TARGET_OS_MAC */
+#if TARGET_OS_IPHONE            /* iOS, tvOS, or watchOS device */
+/*#define TCPS_CLOSE_WAIT 5*/   /* ??? which header contains this, if any ??? */
+#elif TARGET_OS_MAC             /* MacOS */
+#include <netinet/tcp_fsm.h>
+#endif
 #endif
 
 /* fd must be TCP socket (AF_INET, AF_INET6), end-of-stream recv() 0 bytes */
@@ -582,6 +601,7 @@ int fdevent_set_so_reuseaddr (const int fd, const int opt)
 
 #include <sys/stat.h>
 #include "ck.h"
+#include "log.h"
 __attribute_cold__ /*(convenience routine for use at config at startup)*/
 char *
 fdevent_load_file (const char * const fn, off_t *lim, log_error_st *errh, void *(malloc_fn)(size_t), void(free_fn)(void *))

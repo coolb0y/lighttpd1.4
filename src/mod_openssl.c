@@ -2527,8 +2527,8 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
         memcpy(&conf, &defaults, sizeof(conf));
         config_plugin_value_t *cpv = ps->cvlist + ps->cvlist[i].v.u2[0];
         for (; -1 != cpv->k_id; ++cpv) {
-            /* ignore ssl.pemfile (k_id=6); included to process global scope */
-            if (!is_socket_scope && cpv->k_id != 6) {
+            /* ignore ssl.pemfile (k_id=3); included to process global scope */
+            if (!is_socket_scope && cpv->k_id != 3) {
                 log_error(srv->errh, __FILE__, __LINE__,
                   "%s is valid only in global scope or "
                   "$SERVER[\"socket\"] condition", cpk[cpv->k_id].k);
@@ -2878,7 +2878,7 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
         }
         else if (ca_store && (ssl_ca_crl_file || default_ssl_ca_crl_file)) {
             /* prior behavior in lighttpd allowed ssl.ca-crl-file only in global
-             * scope or $SERVER["socket"], so this inheritence from global scope
+             * scope or $SERVER["socket"], so this inheritance from global scope
              * is reasonable.  This code does not implement inheritance of
              * ssl.ca-crl-file from $SERVER["socket"] into nested $HTTP["host"],
              * but the solution is to repeat ssl.ca-crl-file where ssl.ca-file

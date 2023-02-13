@@ -40,6 +40,7 @@ option(WITH_KRB5 "with Kerberos5-support for mod_auth [default: off]")
 option(WITH_LDAP "with LDAP-support for mod_auth mod_vhostdb_ldap [default: off]")
 option(WITH_PAM "with PAM-support for mod_auth [default: off]")
 option(WITH_LUA "with lua for mod_magnet [default: off]")
+option(WITH_LUA_VERSION "specify lua version for mod_magnet")
 # option(WITH_VALGRIND "with internal support for valgrind [default: off]")
 option(WITH_FAM "fam/gamin for reducing number of stat() calls [default: off]")
 option(WITH_LIBDEFLATE "with libdeflate-support for mod_deflate [default: off]")
@@ -345,15 +346,10 @@ endif()
 
 if(WITH_MYSQL)
 	xconfig(mysql_config MYSQL_LDFLAGS MYSQL_CFLAGS)
-
-	set(CMAKE_REQUIRED_INCLUDES /usr/include/mysql)
-	check_include_files(mysql.h HAVE_MYSQL_H)
-	set(CMAKE_REQUIRED_INCLUDES)
-	if(HAVE_MYSQL_H)
-		check_library_exists(mysqlclient mysql_real_connect "" HAVE_MYSQL)
+	if(MYSQL_LDFLAGS)
+		set(HAVE_MYSQL TRUE)
 	endif()
 else()
-	unset(HAVE_MYSQL_H)
 	unset(HAVE_MYSQL)
 endif()
 
@@ -776,14 +772,18 @@ else()
 endif()
 
 if(WITH_LUA)
-	pkg_search_module(LUA REQUIRED lua5.4 lua-5.4 lua5.3 lua-5.3 lua5.2 lua-5.2 lua5.1 lua-5.1 lua)
+	if(WITH_LUA_VERSION)
+		pkg_search_module(LUA REQUIRED ${WITH_LUA_VERSION})
+	else()
+		pkg_search_module(LUA REQUIRED lua5.4 lua-5.4 lua5.3 lua-5.3 lua5.2 lua-5.2 lua5.1 lua-5.1 lua)
+	endif()
 	message(STATUS "found lua at: INCDIR: ${LUA_INCLUDE_DIRS} LIBDIR: ${LUA_LIBRARY_DIRS} LDFLAGS: ${LUA_LDFLAGS} CFLAGS: ${LUA_CFLAGS}")
 	set(HAVE_LUA_H  1 "Have liblua header")
 else()
 	unset(HAVE_LUA_H)
 endif()
 
-if(WITH_FAM AND NOT HAVE_SYS_INOTIFY_H)
+if(WITH_FAM AND NOT HAVE_SYS_INOTIFY_H AND NOT HAVE_KQUEUE)
 	check_include_files(fam.h HAVE_FAM_H)
 	check_library_exists(fam FAMOpen2 "" HAVE_LIBFAM)
 	if(HAVE_LIBFAM)
@@ -817,11 +817,10 @@ set(LIGHTTPD_VERSION_ID 0x104${PROJECT_VERSION_PATCH})
 set(PACKAGE_NAME "${CMAKE_PROJECT_NAME}")
 set(PACKAGE_VERSION "${PROJECT_VERSION}")
 
-if(NOT LIGHTTPD_MODULES_DIR)
-	set(LIGHTTPD_MODULES_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/lighttpd")
-endif()
-
 if(NOT WIN32)
+	if(NOT LIGHTTPD_MODULES_DIR)
+		set(LIGHTTPD_MODULES_DIR "${CMAKE_INSTALL_LIBDIR}/lighttpd")
+	endif()
 	set(LIGHTTPD_LIBRARY_DIR "${CMAKE_INSTALL_PREFIX}/${LIGHTTPD_MODULES_DIR}")
 else()
 	## We use relative path in windows
@@ -910,7 +909,7 @@ add_executable(lighttpd-angel lighttpd-angel.c)
 set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd-angel)
 add_target_properties(lighttpd-angel COMPILE_FLAGS "-DSBIN_DIR=\\\\\"${CMAKE_INSTALL_FULL_SBINDIR}\\\\\"")
 
-set(CORE_SRC
+set(SERVER_SRC
 	server.c
 	response.c
 	connections.c
@@ -930,12 +929,12 @@ set(CORE_SRC
 )
 
 if(BUILD_LIBRARY)
-	add_library(lighttpd ${COMMON_SRC} ${CORE_SRC} ${BUILTIN_MODS})
+	add_library(lighttpd ${SERVER_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
 	if (WITH_ANDROID_NDK_SYSLOG_INTERCEPT)
 		target_link_libraries(lighttpd log)
 	endif()
 else()
-	add_executable(lighttpd ${CORE_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
+	add_executable(lighttpd ${SERVER_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
 	set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
 endif()
 
@@ -1038,10 +1037,10 @@ if(WITH_MAXMINDDB)
 	target_link_libraries(mod_maxminddb maxminddb)
 endif()
 
-if(HAVE_MYSQL_H AND HAVE_MYSQL)
+if(HAVE_MYSQL)
 	add_and_install_library(mod_vhostdb_mysql "mod_vhostdb_mysql.c")
-	target_link_libraries(mod_vhostdb_mysql mysqlclient)
-	include_directories(/usr/include/mysql)
+	target_link_libraries(mod_vhostdb_mysql ${MYSQL_LDFLAGS})
+	add_target_properties(mod_vhostdb_mysql COMPILE_FLAGS ${MYSQL_CFLAGS})
 endif()
 
 if(HAVE_PGSQL)
@@ -1253,8 +1252,8 @@ endif()
 if(NOT WIN32)
 install(TARGETS ${L_INSTALL_TARGETS}
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
-	LIBRARY DESTINATION ${LIGHTTPD_MODULES_DIR}
-	ARCHIVE DESTINATION ${LIGHTTPD_MODULES_DIR}/static)
+	LIBRARY DESTINATION ${LIGHTTPD_LIBRARY_DIR}
+	ARCHIVE DESTINATION ${LIGHTTPD_LIBRARY_DIR}/static)
 else()
 ## HACK to make win32 to install our libraries in desired directory..
 install(TARGETS lighttpd

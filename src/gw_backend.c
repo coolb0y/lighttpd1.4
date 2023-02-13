@@ -240,7 +240,7 @@ static int gw_extension_insert(gw_exts *ext, const buffer *key, gw_host *fh) {
     if (NULL == fe) {
         if (!(ext->used & (8-1))) {
             ck_realloc_u32((void **)&ext->exts,ext->used,8,sizeof(*ext->exts));
-            memset(ext->exts + ext->used, 0, 8 * sizeof(*ext->exts));
+            memset((void *)(ext->exts + ext->used), 0, 8 * sizeof(*ext->exts));
         }
         fe = ext->exts + ext->used++;
         fe->last_used_ndx = -1;
@@ -462,7 +462,7 @@ static int env_add(char_array *env, const char *key, size_t key_len, const char 
 
     if (!key || !val) return -1;
 
-    dst = ck_malloc(key_len + val_len + 3);
+    dst = ck_malloc(key_len + val_len + 2);
     memcpy(dst, key, key_len);
     dst[key_len] = '=';
     memcpy(dst + key_len + 1, val, val_len + 1); /* add the \0 from the value */
@@ -1800,8 +1800,8 @@ static void gw_host_hctx_deq(gw_handler_ctx * const hctx) {
 static void gw_backend_close(gw_handler_ctx * const hctx, request_st * const r) {
     if (hctx->fd >= 0) {
         fdevent_fdnode_event_del(hctx->ev, hctx->fdn);
-        /*fdevent_unregister(ev, hctx->fd);*//*(handled below)*/
-        fdevent_sched_close(hctx->ev, hctx->fd, 1);
+        /*fdevent_unregister(ev, hctx->fdn);*//*(handled below)*/
+        fdevent_sched_close(hctx->ev, hctx->fdn);
         hctx->fdn = NULL;
         hctx->fd = -1;
         gw_host_hctx_deq(hctx);

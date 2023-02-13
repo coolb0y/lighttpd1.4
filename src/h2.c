@@ -1286,8 +1286,8 @@ h2_recv_continuation (uint32_t n, uint32_t clen, const off_t cqlen, chunkqueue *
         /* set padding to 0 since we will overwrite padding in merge below */
         /* (alternatively, could memmove() 9 bytes of frame header over the
          *  pad length octet, remove PADDED flag, add 1 to c->offset,
-         *  add 1 to s, subtract 1 from clen and substract 1 from cqlen,
-         *  substract 1 from n, add 1 to cq->bytes_out) */
+         *  add 1 to s, subtract 1 from clen and subtract 1 from cqlen,
+         *  subtract 1 from n, add 1 to cq->bytes_out) */
         s[9] = 0;
         /* set offset to beginning of padding at end of first frame */
         m -= plen;
@@ -1569,7 +1569,7 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
     if (s[4] & H2_FLAG_PADDED) {
         ++psrc;
         const uint32_t pad = s[9];
-        if (flen < 1 + pad + ((s[4] & H2_FLAG_PRIORITY) ? 5 : 0)) {
+        if (alen < 1 + pad) {
             /* Padding that exceeds the size remaining for the header block
              * fragment MUST be treated as a PROTOCOL_ERROR. */
             h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
@@ -1585,8 +1585,7 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
     }
     if (s[4] & H2_FLAG_PRIORITY) {
         /* XXX: TODO: handle PRIORITY (prio fields start at *psrc) */
-        const uint32_t prio = h2_u31(psrc);
-        if (prio == id) {
+        if (alen < 5 || (/*prio = */h2_u32(psrc)) == id) {
             h2_send_rst_stream(r, con, H2_E_PROTOCOL_ERROR);
             if (!trailers)
                 h2_retire_stream(r, con);
@@ -2042,6 +2041,20 @@ h2_send_hpack (request_st * const r, connection * const con, const char *data, u
 
     headers.u[2] = htonl(r->h2id);
 
+    if (flags & H2_FLAG_END_STREAM) {
+        /* step r->h2state
+         *   H2_STATE_OPEN -> H2_STATE_HALF_CLOSED_LOCAL
+         * or
+         *   H2_STATE_HALF_CLOSED_REMOTE -> H2_STATE_CLOSED */
+      #if 1
+        ++r->h2state;
+      #else
+        r->h2state = (r->h2state == H2_STATE_HALF_CLOSED_REMOTE)
+          ? H2_STATE_CLOSED
+          : H2_STATE_HALF_CLOSED_LOCAL;
+      #endif
+    }
+
     /* similar to h2_send_data(), but unlike DATA frames there is a HEADERS
      * frame potentially followed by CONTINUATION frame(s) here, and the final
      * HEADERS or CONTINUATION frame here has END_HEADERS flag set.
@@ -2050,7 +2063,7 @@ h2_send_hpack (request_st * const r, connection * const con, const char *data, u
     /*(approximate space needed for frames (header + payload)
      * with slight over-estimate of 16 bytes per frame header (> 9)
      * and minimum SETTING_MAX_FRAME_SIZE of 16k (could be larger)
-     * (dlen >> 14)+1 is num 16k frames needed, multipled by 16 bytes
+     * (dlen >> 14)+1 is num 16k frames needed, multiplied by 16 bytes
      *  per frame can be appoximated with (dlen>>10) + 9)*/
     buffer * const b =
       chunkqueue_append_buffer_open_sz(con->write_queue, dlen + (dlen>>10) + 9);
@@ -2571,7 +2584,7 @@ h2_send_data (request_st * const r, connection * const con, const char *data, ui
     /*(approximate space needed for frames (header + payload)
      * with slight over-estimate of 16 bytes per frame header (> 9)
      * and minimum SETTING_MAX_FRAME_SIZE of 16k (could be larger)
-     * (dlen >> 14)+1 is num 16k frames needed, multipled by 16 bytes
+     * (dlen >> 14)+1 is num 16k frames needed, multiplied by 16 bytes
      *  per frame can be appoximated with (dlen>>10) + 9)*/
     buffer * const b =
       chunkqueue_append_buffer_open_sz(con->write_queue, dlen + (dlen>>10) + 9);
@@ -2701,9 +2714,11 @@ h2_send_cqdata (request_st * const r, connection * const con, chunkqueue * const
 }
 
 
+__attribute_noinline__
 static void
 h2_send_end_stream_data (request_st * const r, connection * const con)
 {
+  if (r->h2state != H2_STATE_HALF_CLOSED_LOCAL) {
     union {
       uint8_t c[12];
       uint32_t u[3];          /*(alignment)*/
@@ -2720,6 +2735,7 @@ h2_send_end_stream_data (request_st * const r, connection * const con)
     /*(ignore window updates when sending 0-length DATA frame with END_STREAM)*/
     chunkqueue_append_mem(con->write_queue,  /*(+3 to skip over align pad)*/
                           (const char *)dataframe.c+3, sizeof(dataframe)-3);
+  }
 
     if (r->h2state != H2_STATE_HALF_CLOSED_REMOTE) {
         /* set timestamp for comparison; not tracking individual stream ids */

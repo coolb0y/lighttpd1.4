@@ -239,7 +239,7 @@ typedef struct {
 	chunkqueue in_queue;
 } handler_ctx;
 
-static handler_ctx *handler_ctx_init() {
+static handler_ctx *handler_ctx_init(void) {
 	handler_ctx * const hctx = ck_calloc(1, sizeof(*hctx));
 	chunkqueue_init(&hctx->in_queue);
 	hctx->cache_fd = -1;
@@ -320,6 +320,9 @@ static buffer * mod_deflate_cache_file_name(request_st * const r, const buffer *
      *      Alternatively, could use &r->uri.path, minus any
      *      (matching) &r->pathinfo suffix, with result url-encoded
      *      Alternative, we could shard etag which is already our "checksum" */
+  #ifdef __COVERITY__ /* coverity misses etaglen already checked >= 2 earlier */
+    force_assert(buffer_clen(etag) >= 2);
+  #endif
     buffer * const tb = r->tmp_buf;
     buffer_copy_path_len2(tb, BUF_PTR_LEN(cache_dir),
                               BUF_PTR_LEN(&r->physical.path));

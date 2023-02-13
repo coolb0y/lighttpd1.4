@@ -14,7 +14,7 @@ dnl - if an argument uses more than one line and is not a single
 dnl   function call, the argument should be on different lines than the
 dnl   wrapping braces
 AC_PREREQ([2.60])
-AC_INIT([lighttpd],[1.4.68],[https://redmine.lighttpd.net/projects/lighttpd/boards/2],[lighttpd],[https://www.lighttpd.net/])
+AC_INIT([lighttpd],[1.4.69],[https://redmine.lighttpd.net/projects/lighttpd/boards/2],[lighttpd],[https://www.lighttpd.net/])
 AC_CONFIG_SRCDIR([src/server.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
@@ -890,7 +890,7 @@ AC_MSG_RESULT([$WITH_PCRE2])
 if test "$WITH_PCRE2" != no && test "$WITH_PCRE" = "no"; then
   if test "$WITH_PCRE2" != yes; then
     PCRE_LIB="-L$WITH_PCRE2/lib -lpcre2-8"
-    CPPFLAGS="$CPPFLAGS -I$WITH_PCRE/include"
+    CPPFLAGS="$CPPFLAGS -I$WITH_PCRE2/include"
   else
     PKG_CHECK_MODULES([PCRE2],[libpcre2-8],[
       PCRE_LIB="$PCRE2_LIBS"
@@ -1525,7 +1525,7 @@ if test "$ac_cv_func_sendfile" = yes; then
         #include <sys/types.h>
         #include <sys/socket.h>
         #include <sys/uio.h>
-        int main() {
+        int main(void) {
           int o = 0;
           if (-1 == sendfile(-1, 0, &o, 0) && errno == ENOSYS) return -1;
           return 0;
@@ -1678,7 +1678,6 @@ do_build="\
   mod_rewrite \
   mod_rrdtool \
   mod_scgi \
-  mod_secdownload \
   mod_setenv \
   mod_simple_vhost \
   mod_sockproxy \
@@ -1686,7 +1685,6 @@ do_build="\
   mod_staticfile \
   mod_status \
   mod_userdir \
-  mod_usertrack \
   mod_vhostdb \
   mod_webdav \
   mod_wstunnel \

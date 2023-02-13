@@ -245,6 +245,7 @@ typedef off_t loff_t;
 #define PATH_MAX 4096
 #endif
 
+#ifndef MOD_WEBDAV_BUILD_MINIMAL
 #if defined(HAVE_LIBXML_H) && defined(HAVE_SQLITE3_H)
 
 #define USE_PROPPATCH
@@ -259,6 +260,7 @@ typedef off_t loff_t;
 #endif
 
 #endif /* defined(HAVE_LIBXML_H) && defined(HAVE_SQLITE3_H) */
+#endif /* MOD_WEBDAV_BUILD_MINIMAL */
 
 #include "base.h"
 #include "buffer.h"
@@ -623,14 +625,16 @@ URIHANDLER_FUNC(mod_webdav_uri_handler)
     if (!pconf.enabled) return HANDLER_GO_ON;
 
     /* [RFC4918] 18 DAV Compliance Classes */
-    http_header_response_set(r, HTTP_HEADER_OTHER,
-      CONST_STR_LEN("DAV"),
-     #ifdef USE_LOCKS
-      CONST_STR_LEN("1,2,3")
-     #else
-      CONST_STR_LEN("1,3")
-     #endif
-    );
+  #ifdef USE_LOCKS
+    if (pconf.sql)
+        http_header_response_set(r, HTTP_HEADER_OTHER,
+                                 CONST_STR_LEN("DAV"),
+                                 CONST_STR_LEN("1,2,3"));
+    else
+  #endif
+        http_header_response_set(r, HTTP_HEADER_OTHER,
+                                 CONST_STR_LEN("DAV"),
+                                 CONST_STR_LEN("1,3"));
 
     /* instruct MS Office Web Folders to use DAV
      * (instead of MS FrontPage Extensions)
@@ -643,10 +647,10 @@ URIHANDLER_FUNC(mod_webdav_uri_handler)
         http_header_response_append(r, HTTP_HEADER_ALLOW,
           CONST_STR_LEN("Allow"),
           CONST_STR_LEN("PROPFIND"));
-    else
+  #ifdef USE_PROPPATCH
+    else if (pconf.sql)
         http_header_response_append(r, HTTP_HEADER_ALLOW,
           CONST_STR_LEN("Allow"),
-      #ifdef USE_PROPPATCH
        #ifdef USE_LOCKS
           CONST_STR_LEN(
             "PROPFIND, DELETE, MKCOL, PUT, MOVE, COPY, PROPPATCH, LOCK, UNLOCK")
@@ -654,10 +658,13 @@ URIHANDLER_FUNC(mod_webdav_uri_handler)
           CONST_STR_LEN(
             "PROPFIND, DELETE, MKCOL, PUT, MOVE, COPY, PROPPATCH")
        #endif
-      #else
+        );
+  #endif
+    else
+        http_header_response_append(r, HTTP_HEADER_ALLOW,
+          CONST_STR_LEN("Allow"),
           CONST_STR_LEN(
             "PROPFIND, DELETE, MKCOL, PUT, MOVE, COPY")
-      #endif
         );
 
     return HANDLER_GO_ON;
@@ -3829,7 +3836,7 @@ static xmlDoc *
 webdav_parse_chunkqueue (request_st * const r,
                          const plugin_config * const pconf)
 {
-    /* read the chunks in to the XML document */
+    /* parse the XML document */
     xmlParserCtxtPtr ctxt = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, NULL);
     /* XXX: evaluate adding more xmlParserOptions */
     xmlCtxtUseOptions(ctxt, XML_PARSE_NOERROR | XML_PARSE_NOWARNING
@@ -4645,7 +4652,15 @@ mod_webdav_put_prep (request_st * const r, const plugin_config * const pconf)
         buffer_truncate(&r->physical.path, len);
     }
     if (fd < 0) {
-        http_status_set_error(r, 500); /* Internal Server Error */
+        switch (errno) {
+          case ENOENT:  /* parent collection does not exist */
+          case ENOTDIR:
+            http_status_set_error(r, 409); /* Conflict */
+            break;
+          default:
+            http_status_set_error(r, 500); /* Internal Server Error */
+            break;
+        }
         return HANDLER_FINISHED;
     }
 

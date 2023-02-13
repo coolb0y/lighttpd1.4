@@ -294,7 +294,7 @@ static void fam_dir_tag_refcnt(splay_tree *t, int *keys, int *ndx)
 }
 
 __attribute_noinline__
-static void fam_dir_periodic_cleanup() {
+static void fam_dir_periodic_cleanup(void) {
     stat_cache_fam * const scf = sc.scf;
     int max_ndx, i;
     int keys[512]; /* 2k size on stack */
@@ -560,7 +560,7 @@ static handler_t stat_cache_handle_fdevent(void *ctx, int revent)
 		 *  do not change here so that periodic jobs clean up memory)*/
 		/*sc.stat_cache_engine = STAT_CACHE_ENGINE_NONE; */
 		fdevent_fdnode_event_del(scf->ev, scf->fdn);
-		fdevent_unregister(scf->ev, scf->fd);
+		fdevent_unregister(scf->ev, scf->fdn);
 		scf->fdn = NULL;
 
 		FAMClose(&scf->fam);

@@ -1,5 +1,5 @@
 compiler = meson.get_compiler('c')
-sbinddir = join_paths(get_option('prefix'), get_option('sbindir'))
+sbindir = join_paths(get_option('prefix'), get_option('sbindir'))
 moduledir = join_paths(get_option('prefix'), get_option('moduledir'))
 
 include_base_paths = [
@@ -585,7 +585,7 @@ lemon = executable('lemon',
 configparser = custom_target('configparser',
 	input:  ['configparser.y', 'lempar.c'],
 	output: ['configparser.c', 'configparser.h'],
-	command: [lemon, '-q', 'o=@OUTDIR@', '@INPUT0@', '@INPUT1@'],
+	command: [lemon, '-q', '-d@OUTDIR@', '-T@INPUT1@', '@INPUT0@'],
 )
 
 common_cflags = defs + [
@@ -646,9 +646,9 @@ endif
 executable('lighttpd-angel',
 	sources: 'lighttpd-angel.c',
 	dependencies: common_flags + lighttpd_angel_flags,
-	c_args: ['-DSBIN_DIR="' + sbinddir + '"'],
+	c_args: ['-DSBIN_DIR="' + sbindir + '"'],
 	install: true,
-	install_dir: sbinddir,
+	install_dir: sbindir,
 )
 
 executable('lighttpd', configparser,
@@ -665,7 +665,7 @@ executable('lighttpd', configparser,
 		, clock_lib
 	],
 	install: true,
-	install_dir: sbinddir,
+	install_dir: sbindir,
 )
 
 test('test_common', executable('test_common',
@@ -721,7 +721,6 @@ test('test_mod', executable('test_mod',
 		't/test_mod.c',
 		't/test_mod_access.c',
 		't/test_mod_alias.c',
-		't/test_mod_evasive.c',
 		't/test_mod_evhost.c',
 		't/test_mod_indexfile.c',
 		't/test_mod_simple_vhost.c',

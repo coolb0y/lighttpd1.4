@@ -23,7 +23,7 @@ GET / HTTP/1.0
 EOF
  );
 $t->{RESPONSE} = [ { 'HTTP-Protocol' => 'HTTP/1.0', 'HTTP-Status' => 200 } ];
-ok($tf->handle_http($t) == 0, 'Valid HTTP/1.0 Request') or die();
+ok($tf->handle_http($t) == 0, 'Valid HTTP/1.0 Request') or ($tf->stop_proc, die());
 
 $t->{REQUEST}  = ( <<EOF
 OPTIONS * HTTP/1.0
@@ -439,7 +439,7 @@ ok($tf->handle_http($t) == 0, 'GET, Range start out of range');
 
 
 $t->{REQUEST}  = ( <<EOF
-GET /range.pdf HTTP/1.1
+GET /range.disabled HTTP/1.1
 Host: 123.example.org
 Range: bytes=0-
 Connection: close

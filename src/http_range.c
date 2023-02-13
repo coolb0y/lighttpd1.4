@@ -81,7 +81,7 @@ static const char *
 http_range_parse_next (const char * restrict s, const off_t len,
                        off_t * const restrict ranges)
 {
-    /*(caller must check retured ranges[1] != -1, or else range was invalid)*/
+    /*(caller must check returned ranges[1] != -1, or else range was invalid)*/
 
     /*assert(len > 0);*//*(caller must ensure len > 0)*/
     char *e;
@@ -446,7 +446,7 @@ http_range_rfc7233 (request_st * const r)
             return http_status;
 
       #if 0 /*(questionable utility; not deemed worthwhile)*/
-        /* (In a modular server, the following RFC recommentation might be
+        /* (In a modular server, the following RFC recommendation might be
          *  expensive and invasive to implement perfectly, so only making an
          *  effort here to comply with known headers added within this routine
          *  and within the purview of Range requests)

@@ -40,7 +40,7 @@ versionstamp:
 configparser.h: configparser.c
 configparser.c: $(srcdir)/configparser.y $(srcdir)/lempar.c lemon$(BUILD_EXEEXT)
 	rm -f configparser.h
-	$(LEMON) -q $(srcdir)/configparser.y $(srcdir)/lempar.c
+	$(LEMON) -q -T$(srcdir)/lempar.c $(srcdir)/configparser.y
 
 parsers: configparser.c
 
@@ -117,6 +117,8 @@ common_ldflags = -avoid-version
 common_libadd =
 endif
 common_module_ldflags = -module -export-dynamic $(common_ldflags)
+
+if !LIGHTTPD_STATIC
 
 if BUILD_WITH_MAXMINDDB
 lib_LTLIBRARIES += mod_maxminddb.la
@@ -393,6 +395,8 @@ mod_wstunnel_la_SOURCES = mod_wstunnel.c
 mod_wstunnel_la_LDFLAGS = $(common_module_ldflags)
 mod_wstunnel_la_LIBADD = $(common_libadd) $(CRYPTO_LIB)
 
+endif # !LIGHTTPD_STATIC
+
 
 hdr = base64.h buffer.h burl.h network.h log.h http_kv.h keyvalue.h \
 	response.h request.h reqpool.h chunk.h h2.h \
@@ -442,6 +446,7 @@ lighttpd_SOURCES = \
   mod_cgi.c \
   mod_deflate.c \
   mod_dirlisting.c \
+  mod_evhost.c \
   mod_expire.c \
   mod_extforward.c \
   mod_fastcgi.c \
