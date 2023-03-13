@@ -50,6 +50,10 @@ option(WITH_MAXMINDDB "with MaxMind GeoIP2-support mod_maxminddb [default: off]"
 option(WITH_SASL "with SASL-support for mod_authn_sasl [default: off]")
 option(WITH_XXHASH "with system-provided xxhash [default: off]")
 
+if(NOT LEMON_PATH)
+	set(LEMON_PATH ${CMAKE_CURRENT_BINARY_DIR}/lemon)
+endif()
+
 if(WITH_JAVA_NATIVE_INTERFACE)
 	set(BUILD_LIBRARY 1)
 endif()
@@ -547,8 +551,8 @@ if(WITH_PCRE2)
 		set(HAVE_PCRE 1)
 	else()
 		if(NOT WIN32)
-			check_include_files(pcre2.h HAVE_PCRE_H)
-			check_library_exists(pcre2-8 pcre_match "" HAVE_PCRE)
+			check_include_files(pcre2.h HAVE_PCRE2_H)
+			check_library_exists(pcre2-8 pcre2_match_8 "" HAVE_PCRE)
 			set(PCRE_LDFLAGS -lpcre2-8)
 		else()
 			find_path(PCRE_INCLUDE_DIR pcre2.h)
@@ -872,7 +876,13 @@ else()
   )
 endif()
 
+
 if(CMAKE_CROSSCOMPILING)
+	# Good luck making this work for a cross-compilation on Windows host!
+	# I'll better skip the Lemon build in such scenario, and will rely on
+	# a pre-build Lemon binary copied into the build output folder by
+	# a parent CMake config.
+	if(NOT CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
 	# custom compile lemon using native compiler
 	if(CMAKE_SYSTEM_NAME MATCHES "iOS")
 		execute_process(
@@ -896,6 +906,7 @@ if(CMAKE_CROSSCOMPILING)
 		VERBATIM
 		COMMAND_EXPAND_LISTS
 	)
+	endif()
 else()
 	add_executable(lemon lemon.c)
 endif()
