@@ -17,7 +17,7 @@ static void server_main_loop (server * const srv);
 // errors during the Lighttpd server configuration, and we want those errors,
 // if we opt for the log file.
 
-FILE *errlog = nullptr;
+FILE *errlog = 0;
 int original_stderr = -1; // -1 means stderr is not redirected.
 
 /**
@@ -42,7 +42,7 @@ void errlog_to_stderr() {
   if (original_stderr != -1) {
     fflush(stderr);
     fclose(errlog);
-    errlog = nullptr;
+    errlog = 0;
     dup2(original_stderr, fileno(stderr));
     original_stderr = -1;
   }
