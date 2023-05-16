@@ -6,9 +6,6 @@
 #include <signal.h>
 #include <stdio.h>
 
-extern volatile sig_atomic_t graceful_shutdown;
-static void server_main_loop (server * const srv);
-
 // BEWARE: These errlog_to_file() and errlog_to_stderr(), presumably, duplicate
 // functionality in the normal Lighttpd code, and probably may conflict with it,
 // but for our library scenario we need to do this error log redirection to file
@@ -93,11 +90,7 @@ void syslog(int priority, const char *format, ...)
 
 #include <jni.h>
 
-int lighttpd_jni_main (int argc, char ** argv, JNIEnv *jenv);
-#define main(a,b) \
-  lighttpd_jni_main (int argc, char ** argv, JNIEnv *jenv)
-
-static void lighttpd_jni_main_loop (server * const srv, JNIEnv *jenv)
+static void server_status_running (JNIEnv *jenv)
 {
     jclass ServerClass = (*jenv)->FindClass(jenv, "com/lighttpd/Server");
     if (ServerClass) {
@@ -106,9 +99,8 @@ static void lighttpd_jni_main_loop (server * const srv, JNIEnv *jenv)
         if (onLaunchedID)
             (*jenv)->CallStaticVoidMethod(jenv, ServerClass, onLaunchedID);
     }
-    server_main_loop(srv);
 }
-#define server_main_loop(srv) lighttpd_jni_main_loop((srv), jenv);
+#define server_status_running(srv) server_status_running(jenv);
 
 /**
  * @brief Launches the server in JNI use case.
@@ -139,7 +131,7 @@ JNIEXPORT jint JNICALL Java_com_lighttpd_Server_launch(
 
     optind = 1;
     char *argv[] = { "lighttpd", "-D", "-f", (char*)config_path, NULL };
-    int rc = lighttpd_jni_main(4, argv, jenv);
+    int rc = server_main(4, argv, jenv);
 
     (*jenv)->ReleaseStringUTFChars(jenv, configPath, config_path);
     return rc;
@@ -154,6 +146,10 @@ JNIEXPORT void JNICALL Java_com_lighttpd_Server_gracefulShutdown(
     UNUSED(thisObject);
     graceful_shutdown = 1;
 }
+
+#define main // To prevent renaming of server_main() into main() in server.c
+
+#define server_main(a,b) server_main(int argc, char ** argv, JNIEnv *jenv)
 
 #else
 
