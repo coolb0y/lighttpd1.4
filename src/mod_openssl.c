@@ -37,6 +37,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __linux__        /* uname() */
+#include <sys/utsname.h>
+#endif
+#ifdef __FreeBSD__
+#include <sys/sysctl.h> /* sysctlbyname() */
+#endif
+
 /*(not needed)*/
 /* correction; needed for:
  *   SSL_load_client_CA_file()
@@ -52,6 +59,12 @@
 
 #ifdef BORINGSSL_API_VERSION
 #undef OPENSSL_NO_STDIO /* for X509_STORE_load_locations() */
+#endif
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <Windows.h>
+#undef OCSP_REQUEST /*(defined in wincrypt.h)*/
 #endif
 
 #include <openssl/ssl.h>
@@ -164,6 +177,9 @@ typedef struct {
 } plugin_data;
 
 static int ssl_is_init;
+#ifdef SSL_OP_ENABLE_KTLS /* openssl 3.0.0 */
+static int ktls_enable;
+#endif
 /* need assigned p->id for deep access of module handler_ctx for connection
  *   i.e. handler_ctx *hctx = con->plugin_ctx[plugin_data_singleton->id]; */
 static plugin_data *plugin_data_singleton;
@@ -2243,7 +2259,14 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
       #ifndef SSL_MODE_RELEASE_BUFFERS    /* OpenSSL >= 1.0.0 */
       #define SSL_MODE_RELEASE_BUFFERS 0
       #endif
-        long ssloptions = SSL_OP_ALL
+      #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        uint64_t ssloptions =
+      #elif defined(BORINGSSL_API_VERSION)
+        uint32_t ssloptions =
+      #else
+        long ssloptions =
+      #endif
+                          SSL_OP_ALL
                         | SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION
                         | SSL_OP_NO_COMPRESSION;
 
@@ -2262,7 +2285,11 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
         ssloptions |= SSL_OP_NO_RENEGOTIATION;
       #endif
       #ifdef SSL_OP_ENABLE_KTLS /* openssl 3.0.0 */
-        ssloptions |= SSL_OP_ENABLE_KTLS;
+        if (ktls_enable)
+            ssloptions |= SSL_OP_ENABLE_KTLS;
+      #ifdef SSL_OP_ENABLE_KTLS_TX_ZEROCOPY_SENDFILE
+        ssloptions |= SSL_OP_ENABLE_KTLS_TX_ZEROCOPY_SENDFILE;
+      #endif
       #endif
 
         /* completely useless identifier;
@@ -2681,6 +2708,30 @@ mod_openssl_set_defaults_sockets(server *srv, plugin_data *p)
   #endif
 
     free(srvplug.cvlist);
+
+  #if 0 /*(alt: inherit from global scope in mod_openssl_handle_con_accept()*/
+    if (defaults.ssl_enabled) {
+      #if 0 /* used == 0; priv_defaults hook is called before network_init() */
+        for (uint32_t i = 0; i < srv->srv_sockets.used; ++i) {
+            if (!srv->srv_sockets.ptr[i]->is_ssl) continue;
+            plugin_ssl_ctx *s = p->ssl_ctxs + srv->srv_sockets.ptr[i]->sidx;
+            if (!s->ssl_ctx)/*(no ssl.* directives; inherit from global scope)*/
+                *s = *p->ssl_ctxs;/*(copy struct of ssl_ctx from global scope)*/
+        }
+      #endif
+        for (uint32_t i = 1; i < srv->config_context->used; ++i) {
+            config_cond_info cfginfo;
+            config_get_config_cond_info(&cfginfo, (uint32_t)i);
+            if (cfginfo.comp != COMP_SERVER_SOCKET) continue;
+            plugin_ssl_ctx * const s = p->ssl_ctxs + i;
+            if (!s->ssl_ctx)
+                *s = *p->ssl_ctxs;/*(copy struct of ssl_ctx from global scope)*/
+                /* note: copied even when ssl.engine = "disabled",
+                 * even though config will not be used when disabled */
+        }
+    }
+  #endif
+
     return rc;
 }
 
@@ -2943,6 +2994,30 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
       "openssl library version is outdated and has reached end-of-life.  "
       "As of 1 Jan 2020, only openssl 1.1.1 and later continue to receive "
       "security patches from openssl.org");
+  #endif
+
+  #ifdef SSL_OP_ENABLE_KTLS /* openssl 3.0.0 */
+   #ifdef __linux__
+    struct utsname uts;
+    if (0 == uname(&uts)) {
+      /* check two or more digit linux major kernel version or >= kernel 4.17 */
+      /* (avoid #include <stdio.h> for scanf("%d.%d.%d"); limit stdio.h use) */
+      const char * const v = uts.release;
+      ktls_enable = v[1] != '.' || v[0]-'0' > 4
+                 || (v[0]-'0' == 4 && v[3] != '.' /*(last 4.x.x was 4.20.x)*/
+                     && (v[2]-'0' > 1 || (v[2]-'0' == 1 && v[3]-'0' >= 7)));
+    }
+   #endif
+   #ifdef __FreeBSD__
+    size_t ktls_sz = sizeof(ktls_enable);
+    if (0 != sysctlbyname("kern.ipc.tls.enable",
+                          &ktls_enable, &ktls_sz, NULL, 0)) {
+      #if 0 /*(not present on kernels < FreeBSD 13 unless backported)*/
+        log_perror(srv->errh, __FILE__, __LINE__,
+          "sysctl(\"kern.ipc.tls.enable\")");
+      #endif
+    }
+   #endif
   #endif
 
     return mod_openssl_set_defaults_sockets(srv, p);
@@ -3305,7 +3380,8 @@ CONNECTION_FUNC(mod_openssl_handle_con_accept)
     con->plugin_ctx[p->id] = hctx;
     buffer_blank(&r->uri.authority);
 
-    plugin_ssl_ctx * const s = p->ssl_ctxs + srv_sock->sidx;
+    plugin_ssl_ctx *s = p->ssl_ctxs + srv_sock->sidx;
+    if (NULL == s->ssl_ctx) s = p->ssl_ctxs; /*(inherit from global scope)*/
     hctx->ssl = SSL_new(s->ssl_ctx);
     if (NULL != hctx->ssl
         && SSL_set_app_data(hctx->ssl, hctx)
@@ -3679,6 +3755,7 @@ TRIGGER_FUNC(mod_openssl_handle_trigger) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_openssl_plugin_init (plugin *p);
 int mod_openssl_plugin_init (plugin *p)
 {

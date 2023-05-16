@@ -1,5 +1,9 @@
 #include "first.h"
 
+#include "sys-stat.h"
+#include "sys-unistd.h" /* <unistd.h> */
+#include "sys-wait.h"
+
 #include "base.h"
 #include "burl.h"
 #include "chunk.h"
@@ -18,18 +22,14 @@
 #include "stat_cache.h"
 #include "sys-crypto.h"
 
-#include <sys/stat.h>
-#ifdef HAVE_SYS_WAIT_H
-#include <sys/wait.h>
-#endif
-
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <limits.h>
+#ifndef _WIN32
 #include <glob.h>
+#endif
 
 #ifdef HAVE_SYSLOG_H
 # include <syslog.h>
@@ -755,7 +755,7 @@ static int config_insert_srvconf(server *srv) {
         T_CONFIG_SHORT,
         T_CONFIG_SCOPE_SERVER }
      ,{ CONST_STR_LEN("server.max-request-field-size"),
-        T_CONFIG_INT,
+        T_CONFIG_SHORT,
         T_CONFIG_SCOPE_SERVER }
      ,{ CONST_STR_LEN("server.chunkqueue-chunk-sz"),
         T_CONFIG_INT,
@@ -882,7 +882,7 @@ static int config_insert_srvconf(server *srv) {
                 srv->srvconf.max_conns = (unsigned short)cpv->v.u;
                 break;
               case 19:/* server.max-request-field-size */
-                srv->srvconf.max_request_field_size = cpv->v.u;
+                srv->srvconf.max_request_field_size = cpv->v.shrt;
                 break;
               case 20:/* server.chunkqueue-chunk-sz */
                 chunkqueue_set_chunk_size(cpv->v.u);
@@ -958,6 +958,9 @@ static int config_insert_srvconf(server *srv) {
 
     if (0 == srv->srvconf.port)
         srv->srvconf.port = ssl_enabled ? 443 : 80;
+
+    if (config_feature_bool(srv, "server.h2proto", 1))
+        array_insert_value(srv->srvconf.modules, CONST_STR_LEN("mod_h2"));
 
     config_check_module_duplicates(srv);
 
@@ -1151,11 +1154,13 @@ static int config_insert(server *srv) {
                 break;
               case 13:/* server.follow-symlink */
                #ifndef HAVE_LSTAT
+               #ifndef _WIN32
                 if (0 == cpv->v.u)
                     log_error(srv->errh, __FILE__, __LINE__,
                       "Your system lacks lstat(). "
-                      "We can not differ symlinks from files. "
-                      "Please remove server.follow-symlinks from your config.");
+                      "We can not differentiate symlinks from files. "
+                      "Please remove server.follow-symlink from your config.");
+               #endif
                #endif
                 break;
               case 14:/* server.protocol-http11 */
@@ -1677,6 +1682,10 @@ static void config_log_error_open_syslog(server *srv, log_error_st *errh, const 
         }
     }
     openlog("lighttpd", LOG_CONS|LOG_PID, -1==facility ? LOG_DAEMON : facility);
+  #else
+    UNUSED(srv);
+    UNUSED(errh);
+    UNUSED(syslog_facility);
   #endif
 }
 
@@ -1779,7 +1788,19 @@ int config_log_error_open(server *srv) {
         errfd = -1;
     }
 
-    if (0 != fdevent_set_stdin_stdout_stderr(-1, -1, errfd)) {
+  #ifdef _WIN32
+    if (-1 == errfd) {
+    }
+    else if (-1 != _dup2(errfd, STDERR_FILENO)
+             && SetStdHandle(STD_ERROR_HANDLE,
+                             (HANDLE)_get_osfhandle(STDERR_FILENO))) {
+        fdevent_setfd_cloexec(STDERR_FILENO);
+    }
+    else
+  #else
+    if (0 != fdevent_set_stdin_stdout_stderr(-1, -1, errfd))
+  #endif
+    {
         log_perror(srv->errh, __FILE__, __LINE__, "setting stderr failed");
       #ifdef FD_CLOEXEC
         if (-1 != errfd && NULL == serrh) close(errfd);
@@ -2222,6 +2243,110 @@ static int config_parse_file_stream(server *srv, config_t *context, const char *
     return rc;
 }
 
+#ifdef _WIN32
+/*(minimal glob implementation for lighttpd configfile.c)*/
+#include <windows.h>
+#include <stringapiset.h>
+#include <stdio.h>      /* FILENAME_MAX */
+typedef struct {
+    size_t gl_pathc;
+    char **gl_pathv;
+} glob_t;
+#define GLOB_NOSPACE  1
+#define GLOB_ABORTED  2
+#define GLOB_NOMATCH  3
+static void globfree (glob_t * const gl)
+{
+    for (size_t i = 0; i < gl->gl_pathc; ++i)
+        free(gl->gl_pathv[i]);
+    free(gl->gl_pathv);
+    gl->gl_pathc = 0;
+    gl->gl_pathv = NULL;
+}
+static int glob_C_cmp(const void *arg1, const void *arg2)
+{
+   return strcmp(*(char **)arg1, *(char **)arg2);
+}
+static int glob(const char *pattern, int flags,
+                int (*errfunc) (const char *epath, int eerrno),
+                glob_t * const gl)
+{
+    UNUSED(flags);   /*(not implemented; ignore GLOB_BRACE)*/
+    UNUSED(errfunc); /*(not implemented)*/
+    gl->gl_pathc = 0;
+    gl->gl_pathv = NULL;
+    size_t sz = 0;
+
+    WCHAR wbuf[4096];
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1,
+                                   wbuf, (sizeof(wbuf)/sizeof(*wbuf)));
+    if (0 == wlen) return GLOB_NOSPACE;
+    WIN32_FIND_DATAW ffd;
+    HANDLE hFind = FindFirstFileExW(wbuf, FindExInfoBasic, &ffd,
+                                    FindExSearchNameMatch, NULL,
+                                    FIND_FIRST_EX_LARGE_FETCH);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        DWORD rc = GetLastError();
+        return (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_NO_MORE_FILES)
+          ? GLOB_NOMATCH
+          : GLOB_ABORTED;
+    }
+    const char * const slash = strrchr(pattern, '/');
+    const char * const bslash = strrchr(pattern, '\\');
+    const size_t pathlen = (slash || bslash)
+      ? (size_t)(((slash > bslash) ? slash : bslash) - pattern + 1)
+      : 0;
+
+    char fnUTF8[FILENAME_MAX*4+1];
+    do {
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue; /*(dir check is specific to lighttpd configfile.c use)*/
+
+        if (gl->gl_pathc == sz) {
+            if (0 == sz) sz = 4;
+            sz <<= 1;
+            char **gl_pathv = realloc(gl->gl_pathv, sz * sizeof(char *));
+            if (NULL == gl_pathv) {
+                globfree(gl);
+                return GLOB_NOSPACE;
+            }
+            gl->gl_pathv = gl_pathv;
+        }
+
+        /* construct result with path, if present */
+        /* WC_ERR_INVALID_CHARS not used in string conversion since
+         * expecting valid unicode from reading directory */
+        const size_t len = (size_t)
+          WideCharToMultiByte(CP_UTF8, 0, ffd.cFileName, -1,
+                              fnUTF8, sizeof(fnUTF8), NULL, NULL);
+        if (0 == len) continue; /*(unexpected; skip)*/
+        char * const fn = malloc(pathlen + len); /*(includes '\0')*/
+        if (NULL == fn) {
+            globfree(gl);
+            return GLOB_NOSPACE;
+        }
+        if (pathlen) memcpy(fn, pattern, pathlen);
+        memcpy(fn+pathlen, fnUTF8, len);
+
+        gl->gl_pathv[gl->gl_pathc++] = fn;
+    } while (FindNextFileW(hFind, &ffd));
+
+    DWORD err = GetLastError();
+    FindClose(hFind);
+
+    if (err != ERROR_NO_MORE_FILES) {
+        globfree(gl);
+        return GLOB_ABORTED; /*(actual error in GetLastError())*/
+    }
+    else if (0 == gl->gl_pathc) /*(found only directories)*/
+        return GLOB_NOMATCH;
+
+    qsort(gl->gl_pathv, gl->gl_pathc, sizeof(char *), glob_C_cmp);
+
+    return 0;
+}
+#endif
+
 int config_parse_file(server *srv, config_t *context, const char *fn) {
 	buffer * const filename = buffer_init();
 	const size_t fnlen = strlen(fn);
@@ -2236,7 +2361,8 @@ int config_parse_file(server *srv, config_t *context, const char *fn) {
 	if (buffer_is_blank(context->basedir) ||
 	    (fn[0] == '/' || fn[0] == '\\') ||
 	    (fn[0] == '.' && (fn[1] == '/' || fn[1] == '\\')) ||
-	    (fn[0] == '.' && fn[1] == '.' && (fn[2] == '/' || fn[2] == '\\'))) {
+	    (fn[0] == '.' && fn[1] == '.' && (fn[2] == '/' || fn[2] == '\\')) ||
+	    (light_isalpha(fn[0]) && fn[1] == ':' && (fn[2] == '/' || fn[2] == '\\'))) {
 		buffer_copy_string_len(filename, fn, fnlen);
 	} else {
 		buffer_copy_path_len2(filename, BUF_PTR_LEN(context->basedir),
@@ -2401,7 +2527,7 @@ int config_remoteip_normalize(buffer * const b, buffer * const tb) {
     if (NULL != slash) {
         char *nptr;
         nm_bits = strtoul(slash + 1, &nptr, 10);
-        if (*nptr || 0 == nm_bits || nm_bits > (NULL != colon ? 128 : 32)) {
+        if (*nptr || 0 == nm_bits || nm_bits > (NULL != colon ? 128u : 32u)) {
             /*(also rejects (slash+1 == nptr) which results in nm_bits = 0)*/
             return -1;
         }
@@ -2468,11 +2594,11 @@ int config_read(server *srv, const char *fn) {
 	context_init(srv, &context);
 	context.all_configs = srv->config_context;
 
-#ifdef __WIN32
-	pos = strrchr(fn, '\\');
-#else
 	pos = strrchr(fn, '/');
-#endif
+  #ifdef _WIN32
+	char * const spos = strrchr(fn, '\\');
+	if (spos > pos) pos = spos;
+  #endif
 	if (pos) {
 		buffer_copy_string_len(context.basedir, fn, pos - fn + 1);
 	}
@@ -2555,6 +2681,9 @@ int config_set_defaults(server *srv) {
 
 	if (!srv->srvconf.upload_tempdirs->used) {
 		const char *tmpdir = getenv("TMPDIR");
+	  #ifdef _WIN32
+		if (NULL == tmpdir) tmpdir = getenv("TEMP");
+	  #endif
 		if (NULL == tmpdir) tmpdir = "/var/tmp";
 		array_insert_value(srv->srvconf.upload_tempdirs, tmpdir, strlen(tmpdir));
 	}

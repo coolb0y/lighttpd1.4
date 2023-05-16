@@ -6,7 +6,6 @@
 #include "log.h"
 #include "rand.h"
 #include "chunk.h"
-#include "h2.h"             /* h2_send_1xx() */
 #include "http_range.h"     /* http_range_config_allow_http10() */
 #include "fdevent.h"
 #include "fdlog.h"
@@ -18,7 +17,7 @@
 #include "plugin_config.h"  /* config_plugin_value_tobool() */
 #include "network_write.h"  /* network_write_show_handlers() */
 #include "reqpool.h"        /* request_pool_init() request_pool_free() */
-#include "response.h"       /* http_response_send_1xx_cb_set() strftime_cache_reset() */
+#include "response.h"       /* http_dispatch[] strftime_cache_reset() */
 
 #ifdef HAVE_VERSIONSTAMP_H
 # include "versionstamp.h"
@@ -31,22 +30,87 @@ static const buffer default_server_tag =
   { PACKAGE_DESC "\0server", sizeof(PACKAGE_DESC), 0 };
 
 #include <sys/types.h>
-#include <sys/stat.h>
 #include "sys-setjmp.h"
+#include "sys-stat.h"
 #include "sys-time.h"
+#include "sys-unistd.h" /* <unistd.h> */
 
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <locale.h>
+#ifdef _WIN32
+#include <mbctype.h>    /* _setmbcp() */
+#endif
 
 #include <stdio.h>
 
 #ifdef HAVE_GETOPT_H
 # include <getopt.h>
+#else
+/* basic (very limited) getopt() implementation */
+extern char *optarg;
+extern int optind, opterr, optopt;
+char *optarg = NULL;
+int optind = 1, opterr = 1, optopt = 0;
+int getopt (int argc, char * const argv[], const char *optstring);
+int getopt (int argc, char * const argv[], const char *optstring)
+{
+    static char *nextchar;
+    optarg = NULL;
+    if (optind >= argc || argc < 1)
+        return -1;
+    if (optind <= 1)
+        nextchar = argv[(optind = 1)];
+    else if (nextchar == NULL)
+        nextchar = argv[optind];
+
+    if (nextchar == argv[optind]) {
+        if (*nextchar++ != '-'
+            || nextchar[0] == '\0' /* "-" */
+            || (nextchar[0] == '-' && nextchar[1] == '\0')) { /* "--" */
+            return -1;
+        }
+        ++optind;
+    }
+
+    const char *o = optstring;
+    if (*o == '+' || *o == '-') ++o; /*(ignore; behave as if '+' is set)*/
+    if (*o == ':') ++o;              /*(ignore; behave as if ':' is set)*/
+    for (; *o; ++o) {
+        if (*o == *nextchar)
+            break;
+        if (o[1] == ':') ++o;
+        if (o[1] == ':') ++o;
+    }
+    if (!*o) {
+        /* if (opterr) fprintf(stderr, "..."); */
+        optopt = *nextchar;
+        return '?';
+    }
+
+    if (!*++nextchar)
+        nextchar = NULL;
+
+    if (o[1] == ':') {
+        if (nextchar) {
+            optarg = nextchar;
+            nextchar = NULL;
+        }
+        else if (optind < argc)
+            optarg = argv[optind++];
+        else if (o[2] != ':') {
+            /* if (opterr) fprintf(stderr, "..."); */
+              /*(fprintf if ':' not at beginning of optstring)*/
+            optopt = *o;
+            return ':';
+        }
+    }
+
+    return *o;
+}
 #endif
 
 #ifdef HAVE_VALGRIND_VALGRIND_H
@@ -105,6 +169,19 @@ static size_t malloc_top_pad;
 /* #define USE_ALARM */
 #endif
 
+#ifdef _WIN32
+/* (Note: assume overwrite == 1 in this setenv() replacement) */
+/*#define setenv(name,value,overwrite)  SetEnvironmentVariable((name),(value))*/
+/*#define unsetenv(name)                SetEnvironmentVariable((name),NULL)*/
+#define setenv(name,value,overwrite)  _putenv_s((name), strdup(value))
+#define unsetenv(name)                _putenv_s((name), "")
+#endif
+
+#include "h1.h"
+static const struct http_dispatch h1_1_dispatch_table = {
+  .send_1xx          = h1_send_1xx
+};
+
 static int oneshot_fd = 0;
 static int oneshot_fdout = -1;
 static fdnode *oneshot_fdn = NULL;
@@ -119,6 +196,20 @@ static volatile sig_atomic_t handle_sig_child = 0;
 static volatile sig_atomic_t handle_sig_alarm = 1;
 static volatile sig_atomic_t handle_sig_hup = 0;
 static int idle_limit = 0;
+
+__attribute_cold__
+int server_main (int argc, char ** argv);
+
+#ifdef _WIN32
+#ifndef SIGBREAK
+#define SIGBREAK 21
+#endif
+/* Ctrl-BREAK (repurposed and treated as SIGUSR1)*/
+#ifndef SIGUSR1
+#define SIGUSR1 SIGBREAK
+#endif
+#include "server_win32.c"
+#endif
 
 #if defined(HAVE_SIGACTION) && defined(SA_SIGINFO)
 static volatile siginfo_t last_sigterm_info;
@@ -186,13 +277,56 @@ static void signal_handler(int sig) {
 			graceful_shutdown = 1;
 		}
 		break;
+  #ifndef _WIN32
 	case SIGALRM: handle_sig_alarm = 1; break;
 	case SIGHUP:  handle_sig_hup = 1; break;
 	case SIGCHLD: handle_sig_child = 1; break;
+  #endif
 	}
 }
 #endif
 
+#if defined(HAVE_SIGNAL)
+#ifdef _WIN32
+static BOOL WINAPI ConsoleCtrlHandler(DWORD dwType)
+{
+    /* Note: Windows handles "signals" inconsistently, varying depending on
+     * whether or not the program is attached to a non-hidden window.
+     * CTRL_CLOSE_EVENT sent by taskkill can be received if attached to a
+     * non-hidden window, but taskkill /f must be used (and CTRL_CLOSE_EVENT
+     * is not received here) if process is not attached to a window, or if
+     * the window is hidden. (WTH MS?!)  This *does not* catch CTRL_CLOSE_EVENT:
+     *   start -FilePath .\lighttpd.exe -ArgumentList "-D -f lighttpd.conf"
+     *     -WindowStyle Hidden   # (or None)
+     * but any other -WindowStyle can catch CTRL_CLOSE_EVENT.
+     * CTRL_C_EVENT can only be sent to 0 (self process group) or self pid
+     * and is ignored by default (sending signal does not indicate failure)
+     * in numerous other cases.  Some people have resorted to standalone helper
+     * programs to attempt AttachConsole() to a target pid before sending
+     * CTRL_C_EVENT via GenerateConsoleCtrlEvent().  Another alternative is
+     * running lighttpd as a Windows service, which uses a different mechanism,
+     * also more limited than unix signals.  Other alternatives include
+     * NSSM (Non-Sucking Service Manager) or cygwin's cygrunsrv program */
+    switch(dwType) {
+      case CTRL_C_EVENT:
+        signal_handler(SIGINT);
+        break;
+      case CTRL_BREAK_EVENT:
+        /* Ctrl-BREAK (repurposed and treated as SIGUSR1)*/
+        signal_handler(SIGUSR1);
+        break;
+      case CTRL_CLOSE_EVENT:/* sent by taskkill */
+      case CTRL_LOGOFF_EVENT:
+      case CTRL_SHUTDOWN_EVENT:
+        /* non-cancellable event; program terminates soon after return */
+        signal_handler(SIGTERM);/* trigger server shutdown in main thread */
+        Sleep(2000);            /* sleep 2 secs to give threads chance to exit*/
+        return FALSE;
+    }
+    return TRUE;
+}
+#endif
+#endif
 
 static void server_main_setup_signals (void) {
   #ifdef HAVE_SIGACTION
@@ -231,20 +365,27 @@ static void server_main_setup_signals (void) {
     act.sa_flags |= SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &act, NULL);
   #elif defined(HAVE_SIGNAL)
+   #ifndef _WIN32
     /* ignore the SIGPIPE from sendfile() */
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGALRM, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGHUP,  signal_handler);
-    signal(SIGCHLD, signal_handler);
+   #endif
     signal(SIGINT,  signal_handler);
+    signal(SIGTERM, signal_handler);
+   #ifndef _WIN32
+    signal(SIGHUP,  signal_handler);
+    signal(SIGALRM, signal_handler);
     signal(SIGUSR1, signal_handler);
+    signal(SIGCHLD, signal_handler);
+   #else
+    /* Ctrl-BREAK (repurposed and treated as SIGUSR1)*/
+    signal(SIGUSR1, signal_handler);
+    SetConsoleCtrlHandler((PHANDLER_ROUTINE)ConsoleCtrlHandler,TRUE);
+   #endif
    #ifndef _MSC_VER
     signal(SIGBUS,  sys_setjmp_sigbus);
    #endif
   #endif
 }
-
 
 #ifdef HAVE_FORK
 static int daemonize(void) {
@@ -303,10 +444,14 @@ static int clockid_mono_coarse = 0;
 static unix_time64_t
 server_monotonic_secs (void)
 {
+  #ifdef _MSC_VER
+    return (unix_time64_t)(GetTickCount64() / 1000);
+  #else
     unix_timespec64_t ts;
     return (0 == log_clock_gettime(clockid_mono_coarse, &ts))
       ? ts.tv_sec
       : log_monotonic_secs;
+  #endif
 }
 
 static unix_time64_t
@@ -383,6 +528,7 @@ static server *server_init(void) {
 	srv->default_server_tag = &default_server_tag;
 
 	log_con_jqueue = (connection *)(uintptr_t)&log_con_jqueue;/*(sentinel)*/
+	memset(http_dispatch, 0, sizeof(http_dispatch));
 
 	return srv;
 }
@@ -396,13 +542,16 @@ static void server_free(server *srv) {
 			fdevent_unregister(srv->ev, oneshot_fdn);
 			oneshot_fdn = NULL;
 		}
-		close(oneshot_fd);
+		if (oneshot_fdout >= 0)
+			fdio_close_pipe(oneshot_fd);
+		else
+			fdio_close_socket(oneshot_fd);
 	}
 	if (oneshot_fdout >= 0) {
-		close(oneshot_fdout);
+		fdio_close_pipe(oneshot_fdout);
 	}
 	if (srv->stdin_fd >= 0) {
-		close(srv->stdin_fd);
+		fdio_close_socket(srv->stdin_fd);
 	}
 
 	buffer_free(srv->tmp_buf);
@@ -591,7 +740,7 @@ static int server_oneshot_init_pipe(server *srv, int fdin, int fdout) {
 
     /* note: existing routines assume socket, not pipe
      * connections.c:connection_read_cq()
-     *   uses recv() ifdef __WIN32
+     *   uses recv() ifdef _WIN32
      *   passes S_IFSOCK to fdevent_ioctl_fionread()
      *   (The routine could be copied and modified, if required)
      * This is unlikely to work if TLS is used over pipe since the SSL_CTX
@@ -637,7 +786,7 @@ static int server_oneshot_init(server *srv, int fd) {
 	}
 
 	/*(must set flags; fd did not pass through fdevent accept() logic)*/
-	if (-1 == fdevent_fcntl_set_nb_cloexec(fd)) {
+	if (-1 == fdevent_socket_set_nb_cloexec(fd)) {
 		log_perror(srv->errh, __FILE__, __LINE__, "fcntl()");
 		return 0;
 	}
@@ -888,7 +1037,7 @@ static void server_sockets_close (server *srv) {
         server_socket *srv_socket = srv->srv_sockets.ptr[i];
         if (-1 == srv_socket->fd) continue;
         if (2 != srv->sockets_disabled) network_unregister_sock(srv,srv_socket);
-        close(srv_socket->fd);
+        fdio_close_socket(srv_socket->fd);
         srv_socket->fd = -1;
         /* network_close() will cleanup after us */
     }
@@ -898,6 +1047,7 @@ static void server_sockets_close (server *srv) {
 __attribute_cold__
 static void server_graceful_signal_prev_generation (void)
 {
+  #ifdef HAVE_FORK
     const char * const prev_gen = getenv("LIGHTTPD_PREV_GEN");
     if (NULL == prev_gen) return;
     pid_t pid = (pid_t)strtol(prev_gen, NULL, 10);
@@ -905,6 +1055,7 @@ static void server_graceful_signal_prev_generation (void)
     if (pid <= 0) return; /*(should not happen)*/
     if (pid == fdevent_waitpid(pid,NULL,1)) return; /*(pid exited; unexpected)*/
     kill(pid, SIGINT); /* signal previous generation for graceful shutdown */
+  #endif
 }
 
 __attribute_cold__
@@ -967,8 +1118,10 @@ static int server_graceful_state_bg (server *srv) {
         return 0;
     }
    #endif
-  #else
+  #elif defined(HAVE_FORK)
     pid_t pid = fork();
+  #else
+    pid_t pid = -1;
   #endif
     if (pid) { /* original process */
         if (pid < 0) return 0;
@@ -1035,6 +1188,10 @@ static void server_graceful_shutdown_maint (server *srv) {
     connection_graceful_shutdown_maint(srv);
 }
 
+#ifndef server_status_stopping
+#define server_status_stopping(srv) do { } while (0)
+#endif
+
 __attribute_cold__
 __attribute_noinline__
 static void server_graceful_state (server *srv) {
@@ -1048,6 +1205,8 @@ static void server_graceful_state (server *srv) {
         }
         server_graceful_shutdown_maint(srv);
     }
+
+    server_status_stopping(srv);/*might be called multiple times; intentional*/
 
     if (2 == srv->sockets_disabled || 3 == srv->sockets_disabled) {
         if (oneshot_fd) graceful_restart = 0;
@@ -1303,7 +1462,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		}
 	}
 
-      #ifdef __CYGWIN__
+      #if defined(__CYGWIN__) || defined(_WIN32)
 	if (!srv->config_data_base && NULL != getenv("NSSM_SERVICE_NAME")) {
 		char *dir = getenv("NSSM_SERVICE_DIR");
 		if (NULL != dir && 0 != chdir(dir)) {
@@ -1317,6 +1476,9 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			return -1;
 		}
 	}
+      #ifndef HAVE_FORK
+	srv->srvconf.dont_daemonize = 1;
+      #endif
       #endif
 
 	if (!srv->config_data_base) {
@@ -1375,6 +1537,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			return -1;
 		}
 
+	  #ifndef _WIN32 /*(skip S_ISFIFO() and hope for the best if _WIN32)*/
 		if (S_ISFIFO(st.st_mode)) {
 			oneshot_fdout = dup(STDOUT_FILENO);
 			if (oneshot_fdout <= STDERR_FILENO) {
@@ -1382,6 +1545,8 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 				return -1;
 			}
 		}
+	  #endif
+	  #ifndef _WIN32 /*(skip S_ISSOCK() and hope for the best if _WIN32)*/
 		else if (!S_ISSOCK(st.st_mode)) {
 			/* require that fd is a socket
 			 * (modules might expect STDIN_FILENO and STDOUT_FILENO opened to /dev/null) */
@@ -1389,9 +1554,13 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			  "lighttpd -1 stdin is not a socket");
 			return -1;
 		}
+	  #endif
 	}
 
 	if (srv->srvconf.bindhost && buffer_is_equal_string(srv->srvconf.bindhost, CONST_STR_LEN("/dev/stdin"))) {
+		/* XXX: to potentially support on _WIN32,
+		 *      (SOCKET)GetStdHandle(STD_INPUT_HANDLE) and
+		 *      WSADuplicateSocket() instead of dup() */
 		if (-1 == srv->stdin_fd)
 			srv->stdin_fd = dup(STDIN_FILENO);
 		if (srv->stdin_fd <= STDERR_FILENO) {
@@ -1402,6 +1571,27 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	}
 
 	/* close stdin and stdout, as they are not needed */
+  #ifdef _WIN32
+	/* _WIN32 file descriptors are not allocated lowest first.
+	 * Open NUL in binary mode and as (default) inheritable handle
+	 * https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/dup-dup2?view=msvc-170
+	 *
+	 * A stream is associated with a file descriptor (_fileno(stream)).
+	 * An open file descriptor has an underlying operating system HANDLE.
+	 * However, standard handles are cached at program startup,
+	 * so we try to match them all back up after redirection. */
+	if (   NULL == freopen("nul:", "rb", stdin)
+	    || NULL == freopen("nul:", "wb", stdout)
+	    || (_fileno(stderr) == -2
+		&& NULL == freopen("nul:", "wb", stderr))) {
+		log_perror(srv->errh, __FILE__, __LINE__, "freopen() NUL");
+		return -1;
+	}
+	SetStdHandle(STD_INPUT_HANDLE, (HANDLE)_get_osfhandle(_fileno(stdin)));
+	SetStdHandle(STD_OUTPUT_HANDLE,(HANDLE)_get_osfhandle(_fileno(stdout)));
+	SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(_fileno(stderr)));
+	fdevent_setfd_cloexec(STDERR_FILENO);
+  #else
 	{
 		struct stat st;
 		int devnull;
@@ -1433,14 +1623,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		if (devnull != errfd) close(devnull);
 	      #endif
 	}
-
-	http_response_send_1xx_cb_set(NULL, HTTP_VERSION_2);
-	if (!config_feature_bool(srv, "server.h2-discard-backend-1xx", 0))
-		http_response_send_1xx_cb_set(h2_send_1xx, HTTP_VERSION_2);
-
-	http_response_send_1xx_cb_set(NULL, HTTP_VERSION_1_1);
-	if (!config_feature_bool(srv, "server.h1-discard-backend-1xx", 0))
-		http_response_send_1xx_cb_set(connection_send_1xx, HTTP_VERSION_1_1);
+  #endif
 
 	http_range_config_allow_http10(config_feature_bool(srv, "http10.range", 0));
 
@@ -1460,6 +1643,20 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		log_error(srv->errh, __FILE__, __LINE__,
 		  "Initialization of plugins failed. Going down.");
 		return -1;
+	}
+
+	http_dispatch[HTTP_VERSION_1_1] = h1_1_dispatch_table; /* copy struct */
+
+	if (config_feature_bool(srv, "server.h2-discard-backend-1xx", 0))
+		http_dispatch[HTTP_VERSION_2].send_1xx = 0;
+
+	if (config_feature_bool(srv, "server.h1-discard-backend-1xx", 0))
+		http_dispatch[HTTP_VERSION_1_1].send_1xx = 0;
+
+	if (config_feature_bool(srv, "server.discard-backend-1xx", 0)) {
+		http_dispatch[HTTP_VERSION_3].send_1xx = 0;
+		http_dispatch[HTTP_VERSION_2].send_1xx = 0;
+		http_dispatch[HTTP_VERSION_1_1].send_1xx = 0;
 	}
 
 	/* mod_indexfile should be listed in server.modules prior to dynamic handlers */
@@ -1552,6 +1749,12 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			rlim.rlim_cur = rlim.rlim_max;
 			setrlimit(RLIMIT_CORE, &rlim);
 		}
+#else
+	  #ifdef _WIN32
+		/*(default upper limit of 4k if server.max-fds not specified)*/
+		if (0 == srv->srvconf.max_fds)
+			srv->srvconf.max_fds = 4096;
+	  #endif
 #endif
 	}
 
@@ -1680,8 +1883,10 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 
 	server_main_setup_signals();
 
+  #ifdef HAVE_GETUID
 	srv->gid = getgid();
 	srv->uid = getuid();
+  #endif
 	srv->pid = getpid();
 
 	/* write pid file */
@@ -1816,6 +2021,9 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 #endif
 
 	/* get the current number of FDs */
+  #ifdef _WIN32
+	srv->cur_fds = 3; /*(estimate on _WIN32)*/
+  #else
 	{
 		int fd = fdevent_open_devnull();
 		if (fd >= 0) {
@@ -1823,6 +2031,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			close(fd);
 		}
 	}
+  #endif
 
 	if (0 != server_sockets_set_nb_cloexec(srv)) {
 		log_error(srv->errh, __FILE__, __LINE__,
@@ -2001,7 +2210,10 @@ static void server_main_loop (server * const srv) {
 			server_load_check(srv);
 		}
 
-		static connection * const sentinel =
+	  #ifndef _MSC_VER
+		static
+	  #endif
+		connection * const sentinel =
 		  (connection *)(uintptr_t)&log_con_jqueue;
 		connection * const joblist = log_con_jqueue;
 		log_con_jqueue = sentinel;
@@ -2056,7 +2268,16 @@ static int main_init_once (void) {
   #endif
 
     /* for nice %b handling in strftime() */
+  #ifdef _WIN32
+    setlocale(LC_ALL, "C.UTF-8");
+   #ifdef __MINGW32__
+    _setmbcp(_MB_CP_LOCALE);
+   #else
+    _setmbcp(_MB_CP_UTF8);
+   #endif
+  #else
     setlocale(LC_TIME, "C");
+  #endif
     tzset();
 
     return 1;
@@ -2066,8 +2287,16 @@ static int main_init_once (void) {
 # include "library-wrap.h"
 #endif
 
+#ifndef server_status_running
+#define server_status_running(srv) do { } while (0)
+#endif
+
+#ifndef main
+#define server_main main
+#endif
+
 __attribute_cold__
-int main (int argc, char ** argv) {
+int server_main (int argc, char ** argv) {
     if (!main_init_once()) return -1;
 
     int rc;
@@ -2082,6 +2311,7 @@ int main (int argc, char ** argv) {
 
         rc = server_main_setup(srv, argc, argv);
         if (rc > 0) {
+            server_status_running(srv);
 
             server_main_loop(srv);
 
@@ -2110,6 +2340,9 @@ int main (int argc, char ** argv) {
         chunkqueue_internal_pipes(0);
         remove_pid_file(srv);
         config_log_error_close(srv);
+      #ifdef _WIN32
+        fdevent_win32_cleanup();
+      #endif
         if (graceful_restart)
             server_sockets_save(srv);
         else

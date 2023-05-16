@@ -40,6 +40,7 @@ versionstamp:
 configparser.h: configparser.c
 configparser.c: $(srcdir)/configparser.y $(srcdir)/lempar.c lemon$(BUILD_EXEEXT)
 	rm -f configparser.h
+	chmod u+w $(srcdir)/configparser.c 2>/dev/null || true
 	$(LEMON) -q -T$(srcdir)/lempar.c $(srcdir)/configparser.y
 
 parsers: configparser.c
@@ -57,16 +58,19 @@ common_src=base64.c buffer.c burl.c log.c \
 	http-header-glue.c \
 	http_cgi.c \
 	http_date.c \
-	rand.c \
+	plugin.c \
+	reqpool.c \
 	request.c \
 	sock_addr.c \
+	rand.c \
 	fdlog_maint.c \
 	fdlog.c \
 	sys-setjmp.c \
 	ck.c
 
-src = server.c response.c connections.c h2.c reqpool.c \
-	plugin.c \
+common_src += fdevent_win32.c fs_win32.c
+
+src = server.c response.c connections.c h1.c h2.c \
 	sock_addr_cache.c \
 	network.c \
 	network_write.c \
@@ -105,8 +109,8 @@ common_ldflags = -avoid-version -no-undefined
 lib_LTLIBRARIES += liblightcomp.la
 liblightcomp_la_SOURCES=$(common_src)
 liblightcomp_la_CFLAGS=$(AM_CFLAGS) $(LIBEV_CFLAGS)
-liblightcomp_la_LDFLAGS = $(common_ldflags)
-liblightcomp_la_LIBADD = $(PCRE_LIB) $(CRYPTO_LIB) $(FAM_LIBS) $(LIBEV_LIBS) $(ATTR_LIB)
+liblightcomp_la_LDFLAGS = $(common_ldflags) --export-all-symbols
+liblightcomp_la_LIBADD = $(PCRE_LIB) $(CRYPTO_LIB) $(FAM_LIBS) $(LIBEV_LIBS) $(ATTR_LIB) $(WS2_32_LIB)
 common_libadd = liblightcomp.la
 if !LIGHTTPD_STATIC
 common_src += mod_auth_api.c mod_vhostdb_api.c
@@ -119,6 +123,11 @@ endif
 common_module_ldflags = -module -export-dynamic $(common_ldflags)
 
 if !LIGHTTPD_STATIC
+
+lib_LTLIBRARIES += mod_h2.la
+mod_h2_la_SOURCES = h2.c ls-hpack/lshpack.c algo_xxhash.c
+mod_h2_la_LDFLAGS = $(common_module_ldflags)
+mod_h2_la_LIBADD = $(common_libadd) $(XXHASH_LIBS)
 
 if BUILD_WITH_MAXMINDDB
 lib_LTLIBRARIES += mod_maxminddb.la
@@ -338,7 +347,7 @@ endif # !LIGHTTPD_STATIC
 
 
 hdr = base64.h buffer.h burl.h network.h log.h http_kv.h keyvalue.h \
-	response.h request.h reqpool.h chunk.h h2.h \
+	response.h request.h reqpool.h chunk.h h1.h h2.h \
 	first.h http_chunk.h \
 	algo_hmac.h \
 	algo_md.h algo_md5.h algo_sha1.h algo_splaytree.h algo_xxhash.h \
@@ -353,9 +362,10 @@ hdr = base64.h buffer.h burl.h network.h log.h http_kv.h keyvalue.h \
 	sock_addr_cache.h \
 	configparser.h \
 	rand.h \
-	sys-crypto.h sys-crypto-md.h \
+	sys-crypto.h sys-crypto-md.h sys-dirent.h \
 	sys-endian.h sys-mmap.h sys-setjmp.h \
-	sys-socket.h sys-strings.h sys-time.h \
+	sys-socket.h sys-stat.h sys-strings.h \
+	sys-time.h sys-unistd.h sys-wait.h \
 	sock_addr.h \
 	mod_auth_api.h \
 	mod_magnet_cache.h \
@@ -479,13 +489,16 @@ lighttpd_SOURCES += mod_wolfssl.c
 lighttpd_CPPFLAGS += $(WOLFSSL_CFLAGS)
 lighttpd_LDADD += $(WOLFSSL_LIBS)
 endif
+#(until switch to mod_h2)
+#lighttpd_SOURCES += h2.c ls-hpack/lshpack.c algo_xxhash.c
+#lighttpd_LDADD += $(XXHASH_LIBS)
 
 else
 
 ## default lighttpd server
 lighttpd_SOURCES = $(src)
 lighttpd_CPPFLAGS = $(FAM_CFLAGS) $(LIBEV_CFLAGS)
-lighttpd_LDADD = $(PCRE_LIB) $(DL_LIB) $(SENDFILE_LIB) $(ATTR_LIB) $(common_libadd) $(CRYPTO_LIB) $(XXHASH_LIBS) $(FAM_LIBS) $(LIBEV_LIBS) $(LIBUNWIND_LIBS)
+lighttpd_LDADD = $(common_libadd) $(PCRE_LIB) $(DL_LIB) $(SENDFILE_LIB) $(ATTR_LIB) $(CRYPTO_LIB) $(XXHASH_LIBS) $(FAM_LIBS) $(LIBEV_LIBS) $(LIBUNWIND_LIBS) $(WS2_32_LIB)
 lighttpd_LDFLAGS = -export-dynamic
 
 endif
@@ -503,10 +516,10 @@ t_test_common_SOURCES = t/test_common.c \
                         fdlog.c \
                         sock_addr.c \
                         ck.c
-t_test_common_LDADD   = $(LIBUNWIND_LIBS) $(PCRE_LIB)
+t_test_common_LDADD   = $(LIBUNWIND_LIBS) $(PCRE_LIB) $(WS2_32_LIB)
 
 t_test_configfile_SOURCES = t/test_configfile.c buffer.c array.c data_config.c http_header.c http_kv.c log.c fdlog.c sock_addr.c ck.c
-t_test_configfile_LDADD = $(PCRE_LIB) $(LIBUNWIND_LIBS)
+t_test_configfile_LDADD = $(PCRE_LIB) $(LIBUNWIND_LIBS) $(WS2_32_LIB)
 
 t_test_mod_SOURCES = $(common_src) t/test_mod.c \
                      t/test_mod_access.c \
@@ -518,7 +531,7 @@ t_test_mod_SOURCES = $(common_src) t/test_mod.c \
                      t/test_mod_staticfile.c \
                      t/test_mod_userdir.c
 t_test_mod_CFLAGS  = $(AM_CFLAGS) $(LIBEV_CFLAGS)
-t_test_mod_LDADD   = $(LIBUNWIND_LIBS) $(PCRE_LIB) $(CRYPTO_LIB) $(DL_LIB) $(FAM_LIBS) $(LIBEV_LIBS) $(ATTR_LIB)
+t_test_mod_LDADD   = $(LIBUNWIND_LIBS) $(PCRE_LIB) $(CRYPTO_LIB) $(DL_LIB) $(FAM_LIBS) $(LIBEV_LIBS) $(ATTR_LIB) $(WS2_32_LIB)
 
 noinst_HEADERS   = $(hdr)
 EXTRA_DIST = \

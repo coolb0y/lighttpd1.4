@@ -19,19 +19,17 @@
 
 #include "sys-socket.h"
 #include "sys-time.h"
+#include "sys-unistd.h" /* <unistd.h> */
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#ifdef HAVE_SYS_WAIT_H
-#include <sys/wait.h>
-#endif
+#include "sys-wait.h"
 
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
 
 #ifdef HAVE_PWD_H
 # include <pwd.h>
@@ -571,7 +569,12 @@ static int build_ssi_cgi_vars(request_st * const r, handler_ctx * const p) {
 static void mod_ssi_timefmt (buffer * const b, buffer *timefmtb, unix_time64_t t, int localtm) {
     struct tm tm;
     const char * const timefmt = buffer_is_blank(timefmtb)
-      ? "%a, %d %b %Y %T %Z"
+      ?
+     #ifdef __MINGW32__
+        "%a, %d %b %Y %H:%M:%S %Z"
+     #else
+        "%a, %d %b %Y %T %Z"
+     #endif
       : timefmtb->ptr;
     buffer_append_strftime(b, timefmt, localtm
                                        ? localtime64_r(&t, &tm)
@@ -1669,6 +1672,7 @@ static handler_t mod_ssi_handle_request_reset(request_st * const r, void *p_d) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_ssi_plugin_init(plugin *p);
 int mod_ssi_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

@@ -1,18 +1,18 @@
 #include "first.h"
 
 #include "stat_cache.h"
+
+#include "sys-stat.h"
+#include "sys-unistd.h" /* <unistd.h> */
+
 #include "log.h"
 #include "fdevent.h"
 #include "http_etag.h"
 #include "algo_splaytree.h"
 
-#include <sys/types.h>
-#include <sys/stat.h>
-
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <unistd.h>
 #include <fcntl.h>
 
 #if defined(HAVE_SYS_XATTR_H)
@@ -23,13 +23,6 @@
 
 #ifdef HAVE_SYS_EXTATTR_H
 # include <sys/extattr.h>
-#endif
-
-#ifndef HAVE_LSTAT
-#define lstat stat
-#ifndef S_ISLNK
-#define S_ISLNK(mode) (0)
-#endif
 #endif
 
 /*
@@ -57,6 +50,7 @@ typedef struct stat_cache {
 static stat_cache sc;
 
 
+__attribute_noinline__
 static void * stat_cache_sptree_find(splay_tree ** const sptree,
                                      const char * const name,
                                      uint32_t len)
@@ -1272,10 +1266,12 @@ stat_cache_entry * stat_cache_get_entry(const buffer * const name) {
 	/* Note: paths are expected to be normalized before calling stat_cache,
 	 * e.g. without repeated '/' */
 
+  #ifndef _WIN32
 	if (name->ptr[0] != '/') {
 		errno = EINVAL;
 		return NULL;
 	}
+  #endif
 
 	/*
 	 * check if the directory for this file has changed
@@ -1333,6 +1329,7 @@ stat_cache_entry * stat_cache_get_entry(const buffer * const name) {
 	if (NULL == sce) {
 
 		/* fix broken stat/open for symlinks to reg files with appended slash on freebsd,osx */
+		/* (local fs_win32_stati64UTF8() checks, but repeat since not obvious)*/
 		if (final_slash && S_ISREG(st.st_mode)) {
 			errno = ENOTDIR;
 			return NULL;
@@ -1452,6 +1449,9 @@ int stat_cache_path_contains_symlink(const buffer *name, log_error_st *errh) {
             return -1;
         }
     } while ((s_cur = strrchr(buf, '/')) > buf); /*(&buf[0]==buf; NULL < buf)*/
+  #else
+    UNUSED(name);
+    UNUSED(errh);
   #endif
 
     return 0;

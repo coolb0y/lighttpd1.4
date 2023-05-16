@@ -136,6 +136,9 @@ functions = {
   'mmap': 'sys/mman.h',
   'pipe2': 'unistd.h',
   'poll': 'poll.h',
+  'posix_spawn': 'spawn.h',
+  'posix_spawn_file_actions_addclosefrom_np': 'spawn.h',
+  'posix_spawn_file_actions_addfchdir_np': 'spawn.h',
   'pread': 'unistd.h',
   'preadv': 'sys/uio.h',
   'pwrite': 'unistd.h',
@@ -358,15 +361,19 @@ if get_option('with_mbedtls')
 	libmbedtls = [ compiler.find_library('mbedtls') ]
 	libmbedx509 = [ compiler.find_library('mbedx509') ]
 	libmbedcrypto = [ compiler.find_library('mbedcrypto') ]
-	libcrypto = [ compiler.find_library('mbedcrypto') ]
+	if compiler.get_define('FORCE_WOLFSSL_CRYPTO') == ''
+	  libcrypto = [ compiler.find_library('mbedcrypto') ]
+	endif
 	conf_data.set('HAVE_LIBMBEDCRYPTO', true)
 endif
 if get_option('with_nettle')
 	# manual search:
 	# header: nettle/nettle-types.h
 	# function: nettle_md5_init (-lnettle)
-	libcrypto = [ dependency('nettle') ]
-	conf_data.set('HAVE_NETTLE_NETTLE_TYPES_H', true)
+	if compiler.get_define('FORCE_WOLFSSL_CRYPTO') == '' and compiler.get_define('FORCE_MBEDTLS_CRYPTO') == ''
+	  libcrypto = [ dependency('nettle') ]
+	  conf_data.set('HAVE_NETTLE_NETTLE_TYPES_H', true)
+	endif
 endif
 if get_option('with_gnutls')
 	# manual search:
@@ -532,6 +539,8 @@ common_src = files(
 	'keyvalue.c',
 	'log.c',
 	'rand.c',
+	'plugin.c',
+	'reqpool.c',
 	'request.c',
 	'ck.c',
 	'sock_addr.c',
@@ -539,12 +548,19 @@ common_src = files(
 	'sys-setjmp.c',
 )
 
+if target_machine.system() == 'windows'
+common_src += files(
+	'fdevent_win32.c',
+	'fs_win32.c',
+)
+endif
+
 main_src = files(
 	'configfile.c',
 	'connections.c',
 	'data_config.c',
+	'h1.c',
 	'h2.c',
-	'plugin.c',
 	'sock_addr_cache.c',
 	'ls-hpack/lshpack.c',
 	'algo_xxhash.c',
@@ -552,7 +568,6 @@ main_src = files(
 	'http_range.c',
 	'network_write.c',
 	'network.c',
-	'reqpool.c',
 	'response.c',
 	'server.c',
 )
@@ -573,7 +588,25 @@ builtin_mods = files(
 )
 
 if get_option('build_static')
-	main_src += builtin_mods
+        builtin_mods += files(
+          'mod_accesslog.c',
+          'mod_ajp13.c',
+          'mod_auth.c', 'mod_auth_api.c',
+          'mod_authn_file.c',
+          'mod_cgi.c',
+          'mod_deflate.c',
+          'mod_dirlisting.c',
+          'mod_extforward.c',
+          'mod_proxy.c',
+          'mod_rrdtool.c',
+          'mod_sockproxy.c',
+          'mod_ssi.c',
+          'mod_status.c',
+          'mod_userdir.c',
+          'mod_vhostdb.c', 'mod_vhostdb_api.c',
+          'mod_webdav.c',
+          'mod_wstunnel.c',
+        )
 endif
 
 lemon = executable('lemon',
@@ -614,28 +647,21 @@ common_flags = [ declare_dependency(
 
 lighttpd_flags = []
 lighttpd_angel_flags = []
-if target_machine.system() == 'windows'
-	lighttpd_flags += [ declare_dependency(
-		compile_args: [
-			'-DLI_DECLARE_EXPORTS',
-		],
-	) ]
-	if compiler.get_id() == 'gcc'
-		libmsvcr70 = [ compiler.find_library('msvcr70') ]
-		lighttpd_flags += libmsvcr70 + [ declare_dependency(
-			link_args: [
-				'-Wl,-subsystem,console',
-			],
-		) ]
-		lighttpd_angel_flags += libmsvcr70 + [ declare_dependency(
-			link_args: [
-				'-Wl,-subsystem,console',
-			],
-		) ]
+
+if get_option('build_static')
+	lighttpd_flags += [ libcrypt, libbz2, libz, libzstd, libbrotli, libdeflate, libelftc ]
+else
+	if target_machine.system() == 'windows' or target_machine.system() == 'cygwin'
+		if (compiler.get_id() == 'gcc' or compiler.get_id() == 'clang')
+			lighttpd_flags += [ declare_dependency(
+				link_args: [
+					'-Wl,--export-all-symbols',
+				],
+			) ]
+		endif
 	endif
 endif
-
-if (compiler.get_id() == 'gcc' or compiler.get_id() == 'clang') and target_machine.system() != 'darwin' and target_machine.system() != 'sunos'
+if (compiler.get_id() == 'gcc' or compiler.get_id() == 'clang') and target_machine.system() != 'darwin' and target_machine.system() != 'sunos' and target_machine.system() != 'windows' and target_machine.system() != 'cygwin'
 	lighttpd_flags += [ declare_dependency(
 		link_args: [
 			'-Wl,-export-dynamic',
@@ -652,7 +678,7 @@ executable('lighttpd-angel',
 )
 
 executable('lighttpd', configparser,
-	sources: common_src + main_src,
+	sources: common_src + main_src + builtin_mods,
 	dependencies: [ common_flags, lighttpd_flags
 		, libattr
 		, libcrypto
@@ -742,14 +768,19 @@ test('test_mod', executable('test_mod',
 	build_by_default: false,
 ))
 
+if get_option('build_static')
+modules = []
+else
 modules = [
 	[ 'mod_accesslog', [ 'mod_accesslog.c' ] ],
 	[ 'mod_ajp13', [ 'mod_ajp13.c' ] ],
 	[ 'mod_auth', [ 'mod_auth.c', 'mod_auth_api.c' ], [ libcrypto ] ],
 	[ 'mod_authn_file', [ 'mod_authn_file.c' ], [ libcrypt, libcrypto ] ],
+	[ 'mod_cgi', [ 'mod_cgi.c' ] ],
 	[ 'mod_deflate', [ 'mod_deflate.c' ], [ libbz2, libz, libzstd, libbrotli, libdeflate ] ],
 	[ 'mod_dirlisting', [ 'mod_dirlisting.c' ] ],
 	[ 'mod_extforward', [ 'mod_extforward.c' ] ],
+	[ 'mod_h2', [ 'h2.c', 'ls-hpack/lshpack.c', 'algo_xxhash.c' ], [ libxxhash ] ],
 	[ 'mod_proxy', [ 'mod_proxy.c' ], socket_libs ],
 	[ 'mod_rrdtool', [ 'mod_rrdtool.c' ] ],
 	[ 'mod_sockproxy', [ 'mod_sockproxy.c' ] ],
@@ -760,11 +791,6 @@ modules = [
 	[ 'mod_webdav', [ 'mod_webdav.c' ], [ libsqlite3, libuuid, libxml2, libelftc ] ],
 	[ 'mod_wstunnel', [ 'mod_wstunnel.c' ], libcrypto ],
 ]
-
-if target_machine.system() != 'windows'
-	modules += [
-		[ 'mod_cgi', [ 'mod_cgi.c' ] ],
-	]
 endif
 
 if get_option('with_lua')

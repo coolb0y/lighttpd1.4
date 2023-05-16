@@ -583,14 +583,14 @@ ajp13_create_env (handler_ctx * const hctx)
         if (0 == method_byte) break;
         x[5] = method_byte;
         /* protocol */
-        const char * const proto = get_http_version_name(r->http_version);
-        n = ajp13_enc_string(x, n, proto, strlen(proto));
+        const buffer * const proto = http_version_buf(r->http_version);
+        n = ajp13_enc_string(x, n, BUF_PTR_LEN(proto));
         if (0 == n) break;
         /* req_uri */
         n = ajp13_enc_string(x, n, BUF_PTR_LEN(&r->uri.path));
         if (0 == n) break;
         /* remote_addr */
-        n = ajp13_enc_string(x, n, BUF_PTR_LEN(&r->con->dst_addr_buf));
+        n = ajp13_enc_string(x, n, BUF_PTR_LEN(r->dst_addr_buf));
         if (0 == n) break;
         /* remote_host *//*(skip DNS lookup)*/
         n = ajp13_enc_string(x, n, NULL, 0);
@@ -991,6 +991,7 @@ ajp13_check_extension (request_st * const r, void *p_d)
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_ajp13_plugin_init (plugin *p);
 int mod_ajp13_plugin_init (plugin *p)
 {

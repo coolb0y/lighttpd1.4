@@ -62,7 +62,8 @@ static handler_t mod_echo_request_body(request_st * const r) {
         /*(r->conf.stream_request_body & FDEVENT_STREAM_REQUEST)*/
         if (!(r->conf.stream_request_body & FDEVENT_STREAM_REQUEST_POLLIN)) {
             r->conf.stream_request_body |= FDEVENT_STREAM_REQUEST_POLLIN;
-            r->con->is_readable = 1; /* trigger optimistic read from client */
+            if (r->http_version <= HTTP_VERSION_1_1)
+                r->con->is_readable = 1; /*trigger optimistic client read */
         }
     }
     return HANDLER_WAIT_FOR_EVENT;
@@ -134,6 +135,7 @@ URIHANDLER_FUNC(mod_echo_handle_uri_clean) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_echo_plugin_init(plugin *p);
 int mod_echo_plugin_init(plugin *p) {
     p->version                 = LIGHTTPD_VERSION_ID;

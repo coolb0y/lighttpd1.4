@@ -150,7 +150,7 @@ static handler_t mod_authn_pam_query(request_st * const r, void *p_d, const buff
 
     mod_authn_pam_patch_config(r, p);
 
-    const char * const addrstr = r->con->dst_addr_buf.ptr;
+    const char * const addrstr = r->dst_addr_buf->ptr;
     rc = pam_start(p->conf.service, username->ptr, &conv, &pamh);
     if (PAM_SUCCESS != rc
      || PAM_SUCCESS !=(rc = pam_set_item(pamh, PAM_RHOST, addrstr))
@@ -173,6 +173,7 @@ static handler_t mod_authn_pam_basic(request_st * const r, void *p_d, const http
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_authn_pam_plugin_init(plugin *p);
 int mod_authn_pam_plugin_init(plugin *p) {
     p->version     = LIGHTTPD_VERSION_ID;

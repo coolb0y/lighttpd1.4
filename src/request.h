@@ -122,12 +122,22 @@ typedef enum {
 struct request_st {
     request_state_t state; /*(modules should not modify request state)*/
     int http_status;
-    uint32_t h2state;      /*(modules should not modify request h2state)*/
-    uint32_t h2id;
-     int32_t h2_rwin;
-     int32_t h2_swin;
-     int16_t h2_rwin_fudge;
-     uint8_t h2_prio;
+
+    union {
+      struct {
+        uint32_t state;    /*(modules should not modify request state)*/
+        uint32_t id;
+         int32_t rwin;
+         int32_t swin;
+         int16_t rwin_fudge;
+         uint8_t prio;
+      } h2;
+      struct {
+           off_t bytes_written_ckpt; /*used by http_request_stats_bytes_out()*/
+           off_t bytes_read_ckpt;    /*used by http_request_stats_bytes_in() */
+           off_t te_chunked;
+      } h1;
+    } x;
 
     http_method_t http_method;
     http_version_t http_version;
@@ -154,7 +164,6 @@ struct request_st {
     array env; /* used to pass lighttpd internal stuff */
 
     off_t reqbody_length; /* request Content-Length */
-    off_t te_chunked;
     off_t resp_body_scratchpad;
 
     buffer *http_host; /* copy of array value buffer ptr; not alloc'ed */
@@ -165,6 +174,9 @@ struct request_st {
 
     buffer pathinfo;
     buffer server_name_buf;
+
+    void *dst_addr;
+    buffer *dst_addr_buf;
 
     /* response */
     uint32_t resp_header_len;
@@ -183,8 +195,6 @@ struct request_st {
     buffer *tmp_buf;                    /* shared; same as srv->tmp_buf */
     response_dechunk *gw_dechunk;
 
-    off_t bytes_written_ckpt; /* used by mod_accesslog */
-    off_t bytes_read_ckpt;    /* used by mod_accesslog */
     unix_timespec64_t start_hp;
 
     int error_handler_saved_status; /* error-handler */
@@ -200,6 +210,20 @@ struct request_st {
 };
 
 
+/* intended only for use by lighttpd base code, not by modules */
+#define request_set_state(r, n) ((r)->state = (n))
+
+/* intended only for use by lighttpd base code, not by modules */
+__attribute_cold__
+static inline void
+request_set_state_error(request_st * const r, const request_state_t state);
+static inline void
+request_set_state_error(request_st * const r, const request_state_t state)
+{
+    request_set_state(r, state);
+}
+
+
 typedef struct http_header_parse_ctx {
     char *k;
     char *v;
@@ -209,6 +233,7 @@ typedef struct http_header_parse_ctx {
     uint8_t pseudo;
     uint8_t scheme;
     uint8_t trailers;
+    uint8_t log_request_header;
     int8_t id;
     uint32_t max_request_field_size;
     unsigned int http_parseopts;
@@ -226,14 +251,21 @@ int http_request_host_policy(buffer *b, unsigned int http_parseopts, int scheme_
 int64_t li_restricted_strtoint64 (const char *v, const uint32_t vlen, const char ** const err);
 
 
+/* "base class" for h2con, h3con, ... */
+typedef struct hxcon {
+    request_st *r[8];
+    uint32_t rused;
+} hxcon;
+
+
 /* convenience macros/functions for display purposes */
 
 #define http_request_state_is_keep_alive(r) \
   (CON_STATE_READ == (r)->state && !buffer_is_blank(&(r)->target_orig))
 
 #define http_con_state_is_keep_alive(con) \
-  ((con)->h2                              \
-   ? 0 == (con)->h2->rused                \
+  ((con)->hx                              \
+   ? 0 == (con)->hx->rused                \
    : http_request_state_is_keep_alive(&(con)->request))
 
 #define http_con_state_append(b, con)                            \
@@ -247,10 +279,12 @@ int64_t li_restricted_strtoint64 (const char *v, const uint32_t vlen, const char
     : http_request_state_short((con)->request.state))
 
 #define http_request_stats_bytes_in(r) \
-   ((r)->read_queue.bytes_out - (r)->bytes_read_ckpt)
+   ((r)->read_queue.bytes_out          \
+    - ((r)->http_version > HTTP_VERSION_1_1 ? 0 : (r)->x.h1.bytes_read_ckpt))
 
 #define http_request_stats_bytes_out(r) \
-   ((r)->write_queue.bytes_out - (r)->bytes_written_ckpt)
+   ((r)->write_queue.bytes_out          \
+    - ((r)->http_version > HTTP_VERSION_1_1 ? 0 : (r)->x.h1.bytes_written_ckpt))
 
 __attribute_pure__
 const char * http_request_state_short (request_state_t state);

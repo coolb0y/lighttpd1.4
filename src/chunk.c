@@ -14,10 +14,10 @@
 #include <sys/stat.h>
 #include "sys-mmap.h"
 #include "sys-setjmp.h"
+#include "sys-unistd.h" /* <unistd.h> */
 
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 
 #include <errno.h>
 #include <string.h>
@@ -193,6 +193,12 @@ chunk_file_pread (int fd, void *buf, size_t count, off_t offset)
 static void chunk_reset_file_chunk(chunk *c) {
 	if (c->file.is_temp) {
 		c->file.is_temp = 0;
+	  #ifdef _WIN32 /*(not expecting c->file.refchg w/ .is_temp)*/
+		if (!c->file.refchg && c->file.fd != -1) {
+			fdio_close_file(c->file.fd);
+			c->file.fd = -1;
+		}
+	  #endif
 		if (!buffer_is_blank(c->mem))
 			unlink(c->mem->ptr);
 	}
@@ -1705,6 +1711,9 @@ const chunk_file_view *
 chunkqueue_chunk_file_viewadj (chunk * const c, off_t n, log_error_st * restrict errh)
 {
     /*assert(c->type == FILE_CHUNK);*/
+    if (c->file.fd < 0 && 0 != chunk_open_file_chunk(c, errh))
+        return NULL;
+
     chunk_file_view * restrict cfv = c->file.view;
 
     if (NULL == cfv) {
@@ -1714,11 +1723,6 @@ chunkqueue_chunk_file_viewadj (chunk * const c, off_t n, log_error_st * restrict
     else if (MAP_FAILED != cfv->mptr)
         munmap(cfv->mptr, (size_t)cfv->mlen);
         /*cfv->mptr= MAP_FAILED;*//*(assigned below)*/
-
-    if (c->file.fd < 0 && 0 != chunk_open_file_chunk(c, errh)) {
-        c->file.view = chunk_file_view_failed(cfv);
-        return NULL;
-    }
 
     cfv->foff = mmap_align_offset(c->offset);
 

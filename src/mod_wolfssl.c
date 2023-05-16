@@ -3005,7 +3005,8 @@ CONNECTION_FUNC(mod_openssl_handle_con_accept)
     con->plugin_ctx[p->id] = hctx;
     buffer_blank(&r->uri.authority);
 
-    plugin_ssl_ctx * const s = p->ssl_ctxs + srv_sock->sidx;
+    plugin_ssl_ctx *s = p->ssl_ctxs + srv_sock->sidx;
+    if (NULL == s->ssl_ctx) s = p->ssl_ctxs; /*(inherit from global scope)*/
     hctx->ssl = SSL_new(s->ssl_ctx);
     if (NULL != hctx->ssl
         && SSL_set_app_data(hctx->ssl, hctx)
@@ -3394,6 +3395,7 @@ TRIGGER_FUNC(mod_openssl_handle_trigger) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_wolfssl_plugin_init (plugin *p);
 int mod_wolfssl_plugin_init (plugin *p)
 {

@@ -402,7 +402,7 @@ static const buffer * http_header_remap_host_match (buffer *b, size_t off, http_
                  * (If no Host in client request, then matching against empty
                  *  string will probably not match, and no remap will be
                  *  performed) */
-                k = is_req
+                k = is_req || NULL == remap_hdrs->forwarded_host
                   ? remap_hdrs->http_host
                   : remap_hdrs->forwarded_host;
                 if (NULL == k) continue;
@@ -689,7 +689,6 @@ static void proxy_set_Forwarded(connection * const con, request_st * const r, co
     }
 
     if (flags & PROXY_FORWARDED_BY) {
-        int family = sock_addr_get_family(&con->srv_socket->addr);
         /* Note: getsockname() and inet_ntop() are expensive operations.
          * (recommendation: do not to enable by=... unless required)
          * future: might use con->srv_socket->srv_token if addr is not
@@ -700,6 +699,7 @@ static void proxy_set_Forwarded(connection * const con, request_st * const r, co
         buffer_append_string_len(b, CONST_STR_LEN("by=\""));
       #ifdef HAVE_SYS_UN_H
         /* special-case: might need to encode unix domain socket path */
+        int family = sock_addr_get_family(&con->srv_socket->addr);
         if (family == AF_UNIX) {
             buffer_append_string_backslash_escaped(
               b, BUF_PTR_LEN(con->srv_socket->srv_token));
@@ -1172,6 +1172,7 @@ static handler_t mod_proxy_check_extension(request_st * const r, void *p_d) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_proxy_plugin_init(plugin *p);
 int mod_proxy_plugin_init(plugin *p) {
 	p->version      = LIGHTTPD_VERSION_ID;

@@ -2333,6 +2333,7 @@ CONNECTION_FUNC(mod_mbedtls_handle_con_accept)
     buffer_blank(&r->uri.authority);
 
     hctx->ssl_ctx = p->ssl_ctxs[srv_sock->sidx].ssl_ctx;
+    if (NULL == hctx->ssl_ctx) hctx->ssl_ctx = p->ssl_ctxs[0].ssl_ctx;
     mbedtls_ssl_init(&hctx->ssl);
     int rc = mbedtls_ssl_setup(&hctx->ssl, hctx->ssl_ctx);
     if (0 == rc) {
@@ -2357,8 +2358,10 @@ CONNECTION_FUNC(mod_mbedtls_handle_con_accept)
      * overlap, and so this debug setting is not reset upon connection close.
      * Once enabled, debug hook will remain so for this mbedtls_ssl_config */
     if (hctx->conf.ssl_log_noise) {/* volume level for debug message callback */
+      #ifdef MBEDTLS_DEBUG_C
       #if MBEDTLS_VERSION_NUMBER >= 0x02000000 /* mbedtls 2.0.0 */
         mbedtls_debug_set_threshold(hctx->conf.ssl_log_noise);
+      #endif
       #endif
         mbedtls_ssl_conf_dbg(hctx->ssl_ctx, mod_mbedtls_debug_cb,
                              (void *)(intptr_t)hctx->conf.ssl_log_noise);
@@ -2722,6 +2725,7 @@ TRIGGER_FUNC(mod_mbedtls_handle_trigger) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_mbedtls_plugin_init (plugin *p);
 int mod_mbedtls_plugin_init (plugin *p)
 {

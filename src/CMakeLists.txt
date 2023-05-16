@@ -156,6 +156,9 @@ check_function_exists(crypt HAVE_CRYPT)
 set(CMAKE_EXTRA_INCLUDE_FILES sys/socket.h)
 check_type_size(socklen_t HAVE_SOCKLEN_T)
 set(CMAKE_EXTRA_INCLUDE_FILES)
+if(WIN32)
+set(HAVE_SOCKLEN_T 1)
+endif()
 
 check_include_files(malloc.h HAVE_MALLOC_H)
 if(HAVE_MALLOC_H)
@@ -216,6 +219,13 @@ check_function_exists(poll HAVE_POLL)
 if(NOT HAVE_POLL)
 check_include_files(sys/select.h HAVE_SYS_SELECT_H)
 check_function_exists(select HAVE_SELECT)
+endif()
+
+check_include_files(spawn.h HAVE_SPAWN_H)
+if(HAVE_SPAWN_H)
+check_function_exists(posix_spawn HAVE_POSIX_SPAWN)
+check_function_exists(posix_spawn_file_actions_addclosefrom_np HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP)
+check_function_exists(posix_spawn_file_actions_addfchdir_np HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDFCHDIR_NP)
 endif()
 
 set(CMAKE_EXTRA_INCLUDE_FILES time.h)
@@ -287,6 +297,9 @@ check_c_source_compiles("
 		struct sockaddr_in6 s; struct in6_addr t=in6addr_any; int i=AF_INET6; s; t.s6_addr[0] = 0;
 		return 0;
 	}" HAVE_IPV6)
+if(WIN32)
+set(HAVE_IPV6 1)
+endif()
 if(CMAKE_SYSTEM_NAME MATCHES "SunOS")
 set(CMAKE_REQUIRED_LIBRARIES)
 endif()
@@ -848,6 +861,8 @@ set(COMMON_SRC
 	http-header-glue.c
 	http_cgi.c
 	http_date.c
+	plugin.c
+	reqpool.c
 	request.c
 	sock_addr.c
 	rand.c
@@ -856,6 +871,9 @@ set(COMMON_SRC
 	sys-setjmp.c
 	ck.c
 )
+if(WIN32)
+	set(COMMON_SRC ${COMMON_SRC} fdevent_win32.c fs_win32.c)
+endif()
 
   set(BUILTIN_MODS
     mod_rewrite.c
@@ -872,6 +890,27 @@ set(COMMON_SRC
     mod_scgi.c
   )
 
+if(BUILD_STATIC)
+  set(BUILTIN_MODS ${BUILTIN_MODS}
+    mod_accesslog.c
+    mod_ajp13.c
+    mod_auth.c mod_auth_api.c
+    mod_authn_file.c
+    mod_cgi.c
+    mod_deflate.c
+    mod_dirlisting.c
+    mod_extforward.c
+    mod_proxy.c
+    mod_rrdtool.c
+    mod_sockproxy.c
+    mod_ssi.c
+    mod_status.c
+    mod_userdir.c
+    mod_vhostdb.c mod_vhostdb_api.c
+    mod_webdav.c
+    mod_wstunnel.c
+  )
+endif()
 
 if(CMAKE_CROSSCOMPILING)
 	# Good luck making this work for a cross-compilation on Windows host!
@@ -920,9 +959,8 @@ set(SERVER_SRC
 	server.c
 	response.c
 	connections.c
+	h1.c
 	h2.c
-	reqpool.c
-	plugin.c
 	sock_addr_cache.c
 	ls-hpack/lshpack.c
 	algo_xxhash.c
@@ -940,28 +978,41 @@ if(BUILD_LIBRARY)
 	if (WITH_ANDROID_NDK_SYSLOG_INTERCEPT)
 		target_link_libraries(lighttpd log)
 	endif()
+elseif(WIN32 AND NOT BUILD_STATIC)
+  set(COMMON_SRC ${COMMON_SRC} mod_auth_api.c mod_vhostdb_api.c)
+  add_executable(lighttpd ${SERVER_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
+  SET_TARGET_PROPERTIES(lighttpd PROPERTIES ENABLE_EXPORTS ON)
+  SET_TARGET_PROPERTIES(lighttpd PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+  set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
 else()
-	add_executable(lighttpd ${SERVER_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
-	set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
+  add_executable(lighttpd ${SERVER_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
+  set(L_INSTALL_TARGETS ${L_INSTALL_TARGETS} lighttpd)
 endif()
 
 add_and_install_library(mod_accesslog mod_accesslog.c)
 add_and_install_library(mod_ajp13 mod_ajp13.c)
+if(WIN32 AND NOT BUILD_STATIC)
+add_and_install_library(mod_auth "mod_auth.c")
+else()
 add_and_install_library(mod_auth "mod_auth.c;mod_auth_api.c")
-add_and_install_library(mod_authn_file "mod_authn_file.c")
-if(NOT WIN32)
-	add_and_install_library(mod_cgi mod_cgi.c)
 endif()
+add_and_install_library(mod_authn_file "mod_authn_file.c")
+add_and_install_library(mod_cgi mod_cgi.c)
 add_and_install_library(mod_deflate mod_deflate.c)
 add_and_install_library(mod_dirlisting mod_dirlisting.c)
 add_and_install_library(mod_extforward mod_extforward.c)
+add_and_install_library(mod_h2 "h2.c;ls-hpack/lshpack.c;algo_xxhash.c")
 add_and_install_library(mod_proxy mod_proxy.c)
 add_and_install_library(mod_rrdtool mod_rrdtool.c)
 add_and_install_library(mod_sockproxy mod_sockproxy.c)
 add_and_install_library(mod_ssi mod_ssi.c)
 add_and_install_library(mod_status mod_status.c)
 add_and_install_library(mod_userdir mod_userdir.c)
+if(WIN32 AND NOT BUILD_STATIC)
+add_and_install_library(mod_vhostdb "mod_vhostdb.c")
+else()
 add_and_install_library(mod_vhostdb "mod_vhostdb.c;mod_vhostdb_api.c")
+endif()
 add_and_install_library(mod_webdav mod_webdav.c)
 add_and_install_library(mod_wstunnel mod_wstunnel.c)
 
@@ -1069,6 +1120,9 @@ if(HAVE_UUID_UUID_H)
 endif()
 
 target_link_libraries(mod_webdav ${L_MOD_WEBDAV})
+if(BUILD_STATIC)
+	target_link_libraries(lighttpd ${L_MOD_WEBDAV} ${XML2_LDFLAGS})
+endif()
 
 set(L_MOD_AUTHN_FILE)
 if(HAVE_LIBCRYPT)
@@ -1081,6 +1135,8 @@ if(BUILD_SANITIZE_ADDRESS AND HAVE_LIBCRYPT)
 	# if libcrypt isn't loaded at that time calling crypt later ends up
 	# calling a nullptr.
 	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=103930
+	target_link_libraries(lighttpd crypt)
+elseif(BUILD_STATIC AND HAVE_LIBCRYPT)
 	target_link_libraries(lighttpd crypt)
 endif()
 
@@ -1128,6 +1184,9 @@ if(HAVE_ZLIB_H OR HAVE_ZSTD_H OR HAVE_BZLIB_H OR HAVE_BROTLI OR HAVE_LIBDEFLATE)
 		set(L_MOD_DEFLATE ${L_MOD_DEFLATE} deflate)
 	endif()
 	target_link_libraries(mod_deflate ${L_MOD_DEFLATE})
+	if(BUILD_STATIC)
+		target_link_libraries(lighttpd ${L_MOD_DEFLATE})
+	endif()
 endif()
 
 if(HAVE_LIBFAM)
@@ -1142,6 +1201,7 @@ endif()
 
 if(HAVE_XXHASH)
 	target_link_libraries(lighttpd xxhash)
+	target_link_libraries(mod_h2   xxhash)
 	target_link_libraries(test_mod xxhash)
 endif()
 
@@ -1152,7 +1212,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
 	set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_WITHDEBINFO} -O2")
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${WARN_LDFLAGS}")
 	set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${WARN_LDFLAGS}")
-	if((NOT APPLE) AND (NOT CMAKE_SYSTEM_NAME MATCHES "SunOS"))
+	if(NOT APPLE AND NOT WIN32 AND NOT CMAKE_SYSTEM_NAME MATCHES "SunOS")
 		add_target_properties(lighttpd LINK_FLAGS "-Wl,-export-dynamic")
 	endif()
 endif()
@@ -1161,14 +1221,6 @@ set_target_properties(lighttpd PROPERTIES CMAKE_INSTALL_PREFIX ${CMAKE_INSTALL_P
 
 if(WIN32)
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNVALGRIND")
-	add_target_properties(lighttpd COMPILE_FLAGS "-DLI_DECLARE_EXPORTS")
-	target_link_libraries(mod_proxy ws2_32)
-	target_link_libraries(mod_ssi ws2_32)
-
-	if(MINGW)
-		target_link_libraries(lighttpd msvcr70)
-		add_target_properties(lighttpd LINK_FLAGS "-Wl,-subsystem,console")
-	endif()
 endif()
 
 if(NOT BUILD_STATIC)

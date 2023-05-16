@@ -13,22 +13,31 @@
 #include "http_date.h"
 #include "http_etag.h"
 #include "http_header.h"
-#include "response.h"
+#include "plugin_config.h" /* config_feature_bool */
 #include "sock_addr.h"
 #include "stat_cache.h"
+
+#undef __declspec_dllimport__
+#define __declspec_dllimport__  __declspec_dllexport__
+
+#include "response.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
 #include "sys-socket.h"
-#include <unistd.h>
+#include "sys-unistd.h" /* <unistd.h> */
 
 /**
  * max size of the HTTP response header from backends
  * (differs from server.max-request-field-size for max request field size)
  */
 #define MAX_HTTP_RESPONSE_FIELD_SIZE 65535
+
+/* http_dispatch instance here to be defined in shared object (see base.h)*/
+__declspec_dllexport__
+struct http_dispatch http_dispatch[4];
 
 
 __attribute_cold__
@@ -131,6 +140,45 @@ int http_response_redirect_to_directory(request_st * const r, int status) {
 
 	return 0;
 }
+
+
+__attribute_cold__
+void
+http_response_delay (connection * const con)
+{
+    if (config_feature_bool(con->srv, "auth.delay-invalid-creds", 1)){
+        /*(delay sending response)*/
+        con->is_writable = 0;
+        con->traffic_limit_reached = 1;
+    }
+}
+
+
+int
+http_response_omit_header (request_st * const r, const data_string * const ds)
+{
+    const size_t klen = buffer_clen(&ds->key);
+    if (klen == sizeof("X-Sendfile")-1
+        && buffer_eq_icase_ssn(ds->key.ptr, CONST_STR_LEN("X-Sendfile")))
+        return 1;
+    if (klen >= sizeof("X-LIGHTTPD-")-1
+        && buffer_eq_icase_ssn(ds->key.ptr, CONST_STR_LEN("X-LIGHTTPD-"))) {
+        if (klen == sizeof("X-LIGHTTPD-KBytes-per-second")-1
+            && buffer_eq_icase_ssn(ds->key.ptr+sizeof("X-LIGHTTPD-")-1,
+                                   CONST_STR_LEN("KBytes-per-second"))) {
+            /* "X-LIGHTTPD-KBytes-per-second" */
+            off_t limit = strtol(ds->value.ptr, NULL, 10) << 10; /*(*=1024)*/
+            if (limit > 0
+                && (limit < r->conf.bytes_per_second
+                    || 0 == r->conf.bytes_per_second)) {
+                r->conf.bytes_per_second = limit;
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
 
 #define MTIME_CACHE_MAX 16
 struct mtime_cache_type {
@@ -956,11 +1004,11 @@ static int http_response_process_headers(request_st * const restrict r, http_res
             break;
           case HTTP_HEADER_CONNECTION:
             if (opts->backend == BACKEND_PROXY) continue;
+            if (r->http_version >= HTTP_VERSION_2) continue;
             /*(simplistic attempt to honor backend request to close)*/
             if (http_header_str_contains_token(value, end - value,
                                                CONST_STR_LEN("close")))
                 r->keep_alive = 0;
-            if (r->http_version >= HTTP_VERSION_2) continue;
             break;
           case HTTP_HEADER_CONTENT_TYPE:
             if (end - value >= 22   /*(prefix match probably good enough)*/
@@ -1038,29 +1086,11 @@ static int http_response_process_headers(request_st * const restrict r, http_res
 }
 
 
-static http_response_send_1xx_cb http_response_send_1xx_h1;
-static http_response_send_1xx_cb http_response_send_1xx_h2;
-
-void
-http_response_send_1xx_cb_set (http_response_send_1xx_cb fn, int vers)
-{
-    if (vers >= HTTP_VERSION_2)
-        http_response_send_1xx_h2 = fn;
-    else if (vers == HTTP_VERSION_1_1)
-        http_response_send_1xx_h1 = fn;
-}
-
-
 int
 http_response_send_1xx (request_st * const r)
 {
-    http_response_send_1xx_cb http_response_send_1xx_fn = NULL;
-    if (r->http_version >= HTTP_VERSION_2)
-        http_response_send_1xx_fn = http_response_send_1xx_h2;
-    else if (r->http_version == HTTP_VERSION_1_1)
-        http_response_send_1xx_fn = http_response_send_1xx_h1;
-
-    if (http_response_send_1xx_fn && !http_response_send_1xx_fn(r, r->con))
+    if (    http_dispatch[r->http_version].send_1xx
+        && !http_dispatch[r->http_version].send_1xx(r, r->con))
         return 0; /* error occurred */
 
     http_response_header_clear(r);
@@ -1323,8 +1353,30 @@ handler_t http_response_read(request_st * const r, http_response_opts * const op
             avail = chunk_buffer_prepare_append(b, avail);
         }
 
+      #ifdef _WIN32
+        n = recv(fd, b->ptr+buffer_clen(b), avail, 0);
+        if (n == SOCKET_ERROR) {
+            switch (WSAGetLastError()) {
+              case WSAEWOULDBLOCK:
+              case WSAEINTR:
+                if (buffer_is_blank(b))
+                    chunk_buffer_yield(b); /*(improve large buf reuse)*/
+                return HANDLER_GO_ON;
+              case WSAECONNRESET:
+                if (opts->backend == BACKEND_CGI) {
+                    /* treat as EOF if WSAECONNRESET on local socket from CGI */
+                    n = 0;
+                    break;
+                }
+                __attribute_fallthrough__
+              default:
+                log_serror(r->conf.errh, __FILE__, __LINE__,
+                  "recv() %d %d", r->con->fd, fd);
+                return HANDLER_ERROR;
+            }
+        }
+      #else
         n = read(fd, b->ptr+buffer_clen(b), avail);
-
         if (n < 0) {
             switch (errno) {
               case EAGAIN:
@@ -1343,6 +1395,7 @@ handler_t http_response_read(request_st * const r, http_response_opts * const op
                 return HANDLER_ERROR;
             }
         }
+      #endif
 
         buffer_commit(b, (size_t)n);
       #ifdef __COVERITY__

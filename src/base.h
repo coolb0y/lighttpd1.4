@@ -12,14 +12,25 @@
 #include "request.h"
 #include "sock_addr.h"
 
+#ifdef _WIN32 /* quick kludges; revisit */
+typedef int gid_t;
+/*typedef int uid_t;*/
+#ifndef __uid_t_defined
+#define __uid_t_defined 1
+typedef unsigned __uid_t;
+typedef __uid_t uid_t;
+#endif /* __uid_t_defined */
+#endif
+
 struct fdevents;        /* declaration */
 struct server_socket;   /* declaration */
+struct http_dispatch;   /* declaration */
 
 
 struct connection {
 
 	request_st request;
-	h2con *h2;
+	hxcon *hx;
 
 	int fd;                      /* the FD for this connection */
 	fdnode *fdn;                 /* fdevent (fdnode *) object */
@@ -41,6 +52,7 @@ struct connection {
 	int (* network_write)(struct connection *con, chunkqueue *cq, off_t max_bytes);
 	int (* network_read)(struct connection *con, chunkqueue *cq, off_t max_bytes);
 	handler_t (* reqbody_read)(struct request_st *r);
+	const struct http_dispatch *fn;
 
 	server *srv;
 	void *plugin_slots;
@@ -66,6 +78,7 @@ struct connection {
 
 /* log_con_jqueue is in log.c to be defined in shared object */
 #define joblist_append(con) connection_jq_append(con)
+__declspec_dllimport__
 extern connection *log_con_jqueue;
 static inline void connection_jq_append(connection * const restrict con);
 static inline void connection_jq_append(connection * const restrict con)

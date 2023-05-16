@@ -155,7 +155,7 @@
  */
 
 
-/* linkat() fstatat() unlinkat() fdopendir() NAME_MAX */
+/* linkat() fstatat() unlinkat() fdopendir() */
 #if !defined(_XOPEN_SOURCE) || _XOPEN_SOURCE-0 < 700
 #undef  _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
@@ -176,17 +176,18 @@
 #endif
 
 #include "first.h"      /* first */
+#include <sys/types.h>
+#include "sys-dirent.h"
 #include "sys-mmap.h"
 #include <sys/types.h>
-#include <sys/stat.h>
+#include "sys-stat.h"
 #include "sys-time.h"
-#include <dirent.h>
+#include "sys-unistd.h" /* <unistd.h> getpid() linkat() rmdir() unlinkat() */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>      /* rename() */
 #include <stdlib.h>     /* strtol() */
 #include <string.h>
-#include <unistd.h>     /* getpid() linkat() rmdir() unlinkat() */
 
 #ifdef RENAME_NOREPLACE /*(renameat2() not well-supported yet)*/
 #ifndef __ANDROID_API__ /*(not yet Android?)*/
@@ -231,14 +232,6 @@ typedef off_t loff_t;
 #ifndef _ATFILE_SOURCE
 /*(trigger linkat() fail to fallback logic in mod_webdav.c)*/
 #define linkat(odfd,opath,ndfd,npath,flags) -1
-#endif
-
-#ifndef _D_EXACT_NAMLEN
-#ifdef _DIRENT_HAVE_D_NAMLEN
-#define _D_EXACT_NAMLEN(d) ((d)->d_namlen)
-#else
-#define _D_EXACT_NAMLEN(d) (strlen ((d)->d_name))
-#endif
 #endif
 
 #ifndef PATH_MAX
@@ -306,6 +299,7 @@ SUBREQUEST_FUNC(mod_webdav_subrequest_handler);
 REQUEST_FUNC(mod_webdav_handle_reset);
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_webdav_plugin_init(plugin *p);
 int mod_webdav_plugin_init(plugin *p) {
     p->version           = LIGHTTPD_VERSION_ID;
@@ -2518,7 +2512,7 @@ webdav_delete_dir (const plugin_config * const pconf,
      * so be sure to restore to base each loop iter */
     const uint32_t dst_path_used     = dst->path.used;
     const uint32_t dst_rel_path_used = dst->rel_path.used;
-    int s_isdir;
+    int s_isdir = 0;
     struct dirent *de;
     while (NULL != (de = readdir(dir))) {
         if (de->d_name[0] == '.'
@@ -3219,7 +3213,7 @@ webdav_copymove_dir (const plugin_config * const pconf,
         webdav_xml_response_status(r, &src->rel_path, 403);
         return 403; /* Forbidden */
     }
-    mode_t d_type;
+    mode_t d_type = 0;
     int multi_status = 0;
     struct dirent *de;
     while (NULL != (de = readdir(srcdir))) {
@@ -3433,7 +3427,11 @@ webdav_propfind_live_props (const webdav_propfind_bufs * const restrict pb,
         if (__builtin_expect( (NULL != gmtime64_r(&pb->st.st_ctime, &tm)), 1)) {
             buffer_append_string_len(b, CONST_STR_LEN(
               "<D:creationdate ns0:dt=\"dateTime.tz\">"));
+          #ifdef __MINGW32__
+            buffer_append_strftime(b, "%Y-%m-%dT%H:%M:%SZ", &tm));
+          #else
             buffer_append_strftime(b, "%FT%TZ", &tm));
+          #endif
             buffer_append_string_len(b, CONST_STR_LEN(
               "</D:creationdate>"));
         }

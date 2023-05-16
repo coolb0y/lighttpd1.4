@@ -8,10 +8,10 @@
 
 #include <sys/types.h>
 #include "sys-socket.h"
+#include "sys-unistd.h" /* <unistd.h> */
 
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 
 
 /* on linux 2.4.x you get either sendfile or LFS */
@@ -75,6 +75,9 @@
 #if defined HAVE_SYS_UIO_H && defined HAVE_WRITEV
 # define NETWORK_WRITE_USE_WRITEV
 #endif
+#ifdef _WIN32
+# define NETWORK_WRITE_USE_WRITEV
+#endif
 
 #if defined(HAVE_MMAP) || defined(_WIN32) /*(see local sys-mmap.h)*/
 #ifdef ENABLE_MMAP
@@ -85,9 +88,8 @@
 
 __attribute_cold__
 static int network_write_error(int fd, log_error_st *errh) {
-  #if defined(__WIN32)
-    int lastError = WSAGetLastError();
-    switch (lastError) {
+  #ifdef _WIN32
+    switch (WSAGetLastError()) {
       case WSAEINTR:
       case WSAEWOULDBLOCK:
         return -3;
@@ -96,10 +98,10 @@ static int network_write_error(int fd, log_error_st *errh) {
       case WSAECONNABORTED:
         return -2;
       default:
-        log_error(errh,__FILE__,__LINE__,"send failed: %d %d",lastError,fd);
+        log_serror(errh, __FILE__, __LINE__, "send() %d", fd);
         return -1;
     }
-  #else /* __WIN32 */
+  #else
     switch (errno) {
       case EAGAIN:
       case EINTR:
@@ -108,10 +110,10 @@ static int network_write_error(int fd, log_error_st *errh) {
       case ECONNRESET:
         return -2;
       default:
-        log_perror(errh,__FILE__,__LINE__,"write failed: %d",fd);
+        log_perror(errh, __FILE__, __LINE__, "write() %d", fd);
         return -1;
     }
-  #endif /* __WIN32 */
+  #endif
 }
 
 __attribute_cold__
@@ -123,11 +125,11 @@ static int network_remove_finished_chunks(chunkqueue * const cq, const off_t len
 
 inline
 static ssize_t network_write_data_len(int fd, const char *data, off_t len) {
-  #if defined(__WIN32)
+  #ifdef _WIN32
     return send(fd, data, len, 0);
-  #else /* __WIN32 */
+  #else
     return write(fd, data, len);
-  #endif /* __WIN32 */
+  #endif
 }
 
 static int network_write_accounting(const int fd, chunkqueue * const cq, off_t * const p_max_bytes, log_error_st * const errh, const ssize_t wr, const off_t toSend) {
@@ -237,6 +239,8 @@ static int network_write_file_chunk_mmap(const int fd, chunkqueue * const cq, of
 #elif defined(_XOPEN_IOV_MAX)
 /* minimum value for sysconf(_SC_IOV_MAX); posix requires this to be at least 16, which is good enough - no need to call sysconf() */
 # define SYS_MAX_CHUNKS _XOPEN_IOV_MAX
+#elif defined(_WIN32)
+# define SYS_MAX_CHUNKS 32
 #else
 # error neither UIO_MAXIOV nor IOV_MAX nor _XOPEN_IOV_MAX are defined
 #endif
@@ -250,6 +254,13 @@ static int network_write_file_chunk_mmap(const int fd, chunkqueue * const cq, of
 # define MAX_CHUNKS STACK_MAX_ALLOC_CHUNKS
 #else
 # define MAX_CHUNKS SYS_MAX_CHUNKS
+#endif
+
+#ifdef _WIN32
+/* rewrite iov to WSABUF */
+#define iovec _WSABUF
+#define iov_len len
+#define iov_base buf
 #endif
 
 /* next chunk must be MEM_CHUNK. send multiple mem chunks using writev() */
@@ -273,7 +284,13 @@ static int network_writev_mem_chunks(const int fd, chunkqueue * const cq, off_t 
     }
     if (0 == num_chunks) return network_remove_finished_chunks(cq, 0);
 
+  #ifdef _WIN32
+    DWORD dw;
+    ssize_t wr = WSASend(fd, chunks, num_chunks, &dw, 0, NULL, NULL);
+    if (0 == wr) wr = (ssize_t)dw;
+  #else
     ssize_t wr = writev(fd, chunks, num_chunks);
+  #endif
     return network_write_accounting(fd, cq, p_max_bytes, errh, wr, toSend);
 }
 

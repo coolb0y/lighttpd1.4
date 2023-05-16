@@ -11,185 +11,19 @@
 #include "stat_cache.h"
 #include "chunk.h"
 #include "http_chunk.h"
-#include "http_date.h"
 #include "http_range.h"
 
 #include "plugin.h"
 #include "plugins.h"
 
 #include <sys/types.h>
-#include <sys/stat.h>
+#include "sys-stat.h"
 #include "sys-time.h"
 
 #include <limits.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-
-
-__attribute_cold__
-void
-http_response_delay (connection * const con)
-{
-    if (config_feature_bool(con->srv, "auth.delay-invalid-creds", 1)){
-        /*(delay sending response)*/
-        con->is_writable = 0;
-        con->traffic_limit_reached = 1;
-    }
-}
-
-
-int
-http_response_omit_header (request_st * const r, const data_string * const ds)
-{
-    const size_t klen = buffer_clen(&ds->key);
-    if (klen == sizeof("X-Sendfile")-1
-        && buffer_eq_icase_ssn(ds->key.ptr, CONST_STR_LEN("X-Sendfile")))
-        return 1;
-    if (klen >= sizeof("X-LIGHTTPD-")-1
-        && buffer_eq_icase_ssn(ds->key.ptr, CONST_STR_LEN("X-LIGHTTPD-"))) {
-        if (klen == sizeof("X-LIGHTTPD-KBytes-per-second")-1
-            && buffer_eq_icase_ssn(ds->key.ptr+sizeof("X-LIGHTTPD-")-1,
-                                   CONST_STR_LEN("KBytes-per-second"))) {
-            /* "X-LIGHTTPD-KBytes-per-second" */
-            off_t limit = strtol(ds->value.ptr, NULL, 10) << 10; /*(*=1024)*/
-            if (limit > 0
-                && (limit < r->conf.bytes_per_second
-                    || 0 == r->conf.bytes_per_second)) {
-                r->conf.bytes_per_second = limit;
-            }
-        }
-        return 1;
-    }
-    return 0;
-}
-
-
-__attribute_cold__
-static void
-http_response_write_header_partial_1xx (request_st * const r, buffer * const b)
-{
-    /* take data in con->write_queue and move into b
-     * (to be sent prior to final response headers in r->write_queue) */
-    connection * const con = r->con;
-    /*assert(&r->write_queue != con->write_queue);*/
-    chunkqueue * const cq = con->write_queue;
-    con->write_queue = &r->write_queue;
-
-    /*assert(0 == buffer_clen(b));*//*expect empty buffer from caller*/
-    uint32_t len = (uint32_t)chunkqueue_length(cq);
-    /*(expecting MEM_CHUNK(s), so not expecting error reading files)*/
-    if (chunkqueue_read_data(cq, buffer_string_prepare_append(b, len),
-                             len, r->conf.errh) < 0)
-        len = 0;
-    buffer_truncate(b, len);/*expect initial empty buffer from caller*/
-    chunkqueue_free(cq);
-}
-
-
-void
-http_response_write_header (request_st * const r)
-{
-	/* disable keep-alive if requested */
-
-	r->con->keep_alive_idle = r->conf.max_keep_alive_idle;
-	if (__builtin_expect( (0 == r->conf.max_keep_alive_idle), 0)
-	    || r->con->request_count > r->conf.max_keep_alive_requests) {
-		r->keep_alive = 0;
-	} else if (0 != r->reqbody_length
-		   && r->reqbody_length != r->reqbody_queue.bytes_in
-		   && (NULL == r->handler_module
-		       || 0 == (r->conf.stream_request_body
-		                & (FDEVENT_STREAM_REQUEST
-		                   | FDEVENT_STREAM_REQUEST_BUFMIN)))) {
-		r->keep_alive = 0;
-	}
-
-	if (light_btst(r->resp_htags, HTTP_HEADER_UPGRADE)
-	    && r->http_version == HTTP_VERSION_1_1) {
-		http_header_response_set(r, HTTP_HEADER_CONNECTION, CONST_STR_LEN("Connection"), CONST_STR_LEN("upgrade"));
-	} else if (r->keep_alive <= 0) {
-		if (r->keep_alive < 0)
-			http_response_delay(r->con);
-		http_header_response_set(r, HTTP_HEADER_CONNECTION, CONST_STR_LEN("Connection"), CONST_STR_LEN("close"));
-	} else if (r->http_version == HTTP_VERSION_1_0) {/*(&& r->keep_alive > 0)*/
-		http_header_response_set(r, HTTP_HEADER_CONNECTION, CONST_STR_LEN("Connection"), CONST_STR_LEN("keep-alive"));
-	}
-
-	if (304 == r->http_status
-	    && light_btst(r->resp_htags, HTTP_HEADER_CONTENT_ENCODING)) {
-		http_header_response_unset(r, HTTP_HEADER_CONTENT_ENCODING, CONST_STR_LEN("Content-Encoding"));
-	}
-
-	chunkqueue * const cq = &r->write_queue;
-	buffer * const b = chunkqueue_prepend_buffer_open(cq);
-
-	if (cq != r->con->write_queue)
-		http_response_write_header_partial_1xx(r, b);
-
-	buffer_append_string_len(b,
-	                         (r->http_version == HTTP_VERSION_1_1)
-	                           ? "HTTP/1.1 "
-	                           : "HTTP/1.0 ",
-	                         sizeof("HTTP/1.1 ")-1);
-	http_status_append(b, r->http_status);
-
-	/* add all headers */
-	for (size_t i = 0, used = r->resp_headers.used; i < used; ++i) {
-		const data_string * const ds = (data_string *)r->resp_headers.data[i];
-		const uint32_t klen = buffer_clen(&ds->key);
-		const uint32_t vlen = buffer_clen(&ds->value);
-		if (__builtin_expect( (0 == klen), 0)) continue;
-		if (__builtin_expect( (0 == vlen), 0)) continue;
-		if ((ds->key.ptr[0] & 0xdf) == 'X' && http_response_omit_header(r, ds))
-			continue;
-		char * restrict s = buffer_extend(b, klen+vlen+4);
-		s[0] = '\r';
-		s[1] = '\n';
-		memcpy(s+2, ds->key.ptr, klen);
-		s += 2+klen;
-		s[0] = ':';
-		s[1] = ' ';
-		memcpy(s+2, ds->value.ptr, vlen);
-	}
-
-	if (!light_btst(r->resp_htags, HTTP_HEADER_DATE)) {
-		/* HTTP/1.1 and later requires a Date: header */
-		/* "\r\nDate: " 8-chars + 30-chars "%a, %d %b %Y %T GMT" + '\0' */
-		static unix_time64_t tlast = 0;
-		static char tstr[40] = "\r\nDate: ";
-
-		/* cache the generated timestamp */
-		const unix_time64_t cur_ts = log_epoch_secs;
-		if (__builtin_expect ( (tlast != cur_ts), 0))
-			http_date_time_to_str(tstr+8, sizeof(tstr)-8, (tlast = cur_ts));
-
-		buffer_append_string_len(b, tstr, 37);
-	}
-
-	if (!light_btst(r->resp_htags, HTTP_HEADER_SERVER) && r->conf.server_tag)
-		buffer_append_str2(b, CONST_STR_LEN("\r\nServer: "),
-		                      BUF_PTR_LEN(r->conf.server_tag));
-
-	buffer_append_string_len(b, CONST_STR_LEN("\r\n\r\n"));
-
-	r->resp_header_len = buffer_clen(b);
-
-	if (r->conf.log_response_header) {
-		log_error_multiline(r->conf.errh, __FILE__, __LINE__,
-		                    BUF_PTR_LEN(b), "fd:%d resp: ", r->con->fd);
-	}
-
-	chunkqueue_prepend_buffer_commit(cq);
-
-	/*(optimization to use fewer syscalls to send a small response)*/
-	off_t cqlen;
-	if (r->resp_body_finished
-	    && light_btst(r->resp_htags, HTTP_HEADER_CONTENT_LENGTH)
-	    && (cqlen = chunkqueue_length(cq) - r->resp_header_len) > 0
-	    && cqlen < 16384)
-		chunkqueue_small_resp_optim(cq);
-}
 
 
 __attribute_cold__
@@ -224,14 +58,20 @@ static handler_t http_response_physical_path_check(request_st * const r) {
 			break;
 		case EACCES:
 			return http_response_physical_path_error(r, 403, NULL);
-		case ENAMETOOLONG:
-			/* file name to be read was too long. return 404 */
 		case ENOENT:
 			if (r->http_method == HTTP_METHOD_OPTIONS
 			    && light_btst(r->resp_htags, HTTP_HEADER_ALLOW)) {
 				r->http_status = 200;
 				return HANDLER_FINISHED;
 			}
+		  #ifdef _WIN32
+			/* _WIN32 returns ENOENT instead of ENOTDIR for PATH_INFO */
+			break;
+		  #else
+			__attribute_fallthrough__
+		  #endif
+		case ENAMETOOLONG:
+			/* file name to be read was too long. return 404 */
 			return http_response_physical_path_error(r, 404, NULL);
 		default:
 			/* we have no idea what happened. let's tell the user so. */
@@ -460,7 +300,7 @@ http_response_prepare (request_st * const r)
 
 		/* transform r->uri.path to r->physical.rel_path (relative file path) */
 		buffer_copy_buffer(&r->physical.rel_path, &r->uri.path);
-#if defined(__WIN32) || defined(__CYGWIN__)
+#if defined(_WIN32) || defined(__CYGWIN__)
 		/* strip dots from the end and spaces
 		 *
 		 * windows/dos handle those filenames as the same file
@@ -808,8 +648,8 @@ http_response_write_prepare(request_st * const r)
             }
         }
     }
-    else if (r->http_version == HTTP_VERSION_2) {
-        /* handled by HTTP/2 framing */
+    else if (r->http_version >= HTTP_VERSION_2) {
+        /* handled by HTTP/2 or HTTP/3 framing */
     }
     else {
         /**

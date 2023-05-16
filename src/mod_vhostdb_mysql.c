@@ -114,7 +114,8 @@ static int mod_vhostdb_dbconf_setup (server *srv, const array *opts, void **vdat
             return -1;
         }
 
-        fdevent_setfd_cloexec(dbconn->net.fd);
+        my_socket sfd = mysql_get_socket(dbconn);
+        (void)fdevent_socket_set_cloexec(sfd);
 
         dbconf = (vhostdb_config *)ck_calloc(1, sizeof(*dbconf));
         dbconf->dbconn = dbconn;
@@ -291,6 +292,7 @@ SETDEFAULTS_FUNC(mod_vhostdb_set_defaults) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_vhostdb_mysql_plugin_init (plugin *p);
 int mod_vhostdb_mysql_plugin_init (plugin *p)
 {

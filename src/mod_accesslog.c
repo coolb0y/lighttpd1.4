@@ -15,11 +15,11 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include "sys-unistd.h" /* <unistd.h> */
 
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
-#include <unistd.h>
 
 #ifdef HAVE_SYSLOG_H
 # include <syslog.h>
@@ -453,7 +453,9 @@ SETDEFAULTS_FUNC(mod_accesslog_set_defaults) {
         }
     }
 
+  #ifdef HAVE_SYSLOG_H
     p->defaults.syslog_level = LOG_INFO;
+  #endif
 
     /* initialize p->defaults from global config context */
     if (p->nconfig > 0 && p->cvlist->v.u2[1]) {
@@ -570,8 +572,20 @@ static format_fields * mod_accesslog_process_format(const char * const format, c
 				} else if (FORMAT_HEADER == f->field
 				           || FORMAT_RESPONSE_HEADER == f->field) {
 					f->opt = http_header_hkey_get(BUF_PTR_LEN(fstr));
-				} else if (FORMAT_REMOTE_HOST == f->field) {
+				} else if (FORMAT_REMOTE_HOST == f->field
+				           || FORMAT_REMOTE_ADDR == f->field) {
 					f->field = FORMAT_REMOTE_ADDR;
+					const char * const ptr = fstr->ptr;
+					if (buffer_is_blank(fstr)) {
+					}
+					else if (0 == strcmp(ptr, "mask"))
+						f->opt = 1; /* mask IP addr lower bits (partial anon) */
+					else {
+						log_error(srv->errh, __FILE__, __LINE__,
+							"invalid format %%{mask}a: %s", format);
+						mod_accesslog_free_format_fields(parsed_format);
+						return NULL;
+					}
 				} else if (FORMAT_REMOTE_USER == f->field) {
 					f->field = FORMAT_ENV;
 					buffer_copy_string_len(fstr, CONST_STR_LEN("REMOTE_USER"));
@@ -724,11 +738,19 @@ accesslog_append_time (buffer * const b, const request_st * const r,
 					buffer_clear(ts_accesslog_str);
 				      #if defined(HAVE_STRUCT_TM_GMTOFF)
 					buffer_append_strftime(ts_accesslog_str,
+					                     #ifdef __MINGW32__
+					                       fmt ? fmt : "[%d/%b/%Y:%H:%M:%S %z]",
+					                     #else
 					                       fmt ? fmt : "[%d/%b/%Y:%T %z]",
+					                     #endif
 					                       localtime64_r(&t, &tm));
 				      #else /* HAVE_STRUCT_TM_GMTOFF */
 					buffer_append_strftime(ts_accesslog_str,
+					                     #ifdef ___MINGW32__
+					                       fmt ? fmt : "[%d/%b/%Y:%H:%M:%S +0000]",
+					                     #else
 					                       fmt ? fmt : "[%d/%b/%Y:%T +0000]",
+					                     #endif
 					                       gmtime64_r(&t, &tm));
 				      #endif /* HAVE_STRUCT_TM_GMTOFF */
 					buffer_append_string_buffer(b, ts_accesslog_str);
@@ -759,6 +781,48 @@ accesslog_append_time (buffer * const b, const request_st * const r,
 			return flush;
 }
 
+__attribute_noinline__
+static void
+accesslog_append_remote_addr_masked (buffer * const b, const request_st * const r)
+{
+    /* mask lower bits of IP address string for logging
+     * (similar to masking policy applied by Google Analytics
+     *  https://support.google.com/analytics/answer/2763052) */
+    /* r->dst_addr_buf is normalized and valid string; operate on known valid */
+    const char * const s = r->dst_addr_buf->ptr;
+    uint32_t i = 0;
+    switch (sock_addr_get_family(r->dst_addr)) {
+     #ifdef HAVE_IPV6
+      case AF_INET6:
+        if (__builtin_expect( (s[0] != ':'), 1)
+            || !IN6_IS_ADDR_V4MAPPED(&((sock_addr*)r->dst_addr)->ipv6.sin6_addr)
+            || NULL == strchr(s, '.')) {
+            /* IPv6: mask final 10 octets (80 bits) of address; keep 6 octets */
+            /* Note: treat string starting w/ "::..." as "::" even if "::x:..."
+             * (rather than special-casing; does not detect "::x:..." besides
+             *  v4mapped "::ffff:1.2.3.4" condition check above) */
+            for (int j=0; s[i] != ':' || ((j+=2) != 6 && s[i+1] != ':'); ++i) ;
+            buffer_append_str2(b, s, i+1, CONST_STR_LEN(":"));
+            break;
+        }
+        /* IN6_IS_ADDR_V4MAPPED() */
+        __attribute_fallthrough__
+     #endif
+      case AF_INET:
+        /* IPv4: mask final octet (8 bits) of address */
+       #ifdef __COVERITY__
+        force_assert(buffer_clen(r->dst_addr_buf) > 2);
+        force_assert(strchr(s, '.') != NULL);
+       #endif
+        for (i = buffer_clen(r->dst_addr_buf)-1; s[--i] != '.'; ) ;
+        buffer_append_str2(b, s, i+1, CONST_STR_LEN("0"));
+        break;
+      default:
+        buffer_append_buffer(b, r->dst_addr_buf);
+        break;
+    }
+}
+
 __attribute_cold__
 __attribute_noinline__
 static void
@@ -769,7 +833,7 @@ log_access_record_cold (buffer * const b, const request_st * const r,
     switch (f->field) {
       case FORMAT_SERVER_PORT:
         if (f->opt & FORMAT_FLAG_PORT_REMOTE) {
-            buffer_append_int(b, sock_addr_get_port(&con->dst_addr));
+            buffer_append_int(b, sock_addr_get_port(r->dst_addr));
             break;
         }
         /* else if (f->opt & FORMAT_FLAG_PORT_LOCAL) *//*(default)*/
@@ -875,7 +939,10 @@ static int log_access_record (const request_st * const r, buffer * const b, form
 			/*case FORMAT_REMOTE_HOST:*/
 		  #endif
 			case FORMAT_REMOTE_ADDR:
-				buffer_append_string_buffer(b, &r->con->dst_addr_buf);
+				if (!f->opt)
+					buffer_append_string_buffer(b, r->dst_addr_buf);
+				else
+					accesslog_append_remote_addr_masked(b, r);
 				break;
 			case FORMAT_HTTP_HOST:
 				accesslog_append_buffer(b, &r->uri.authority, esc);
@@ -963,6 +1030,7 @@ REQUESTDONE_FUNC(log_access_write) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_accesslog_plugin_init(plugin *p);
 int mod_accesslog_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

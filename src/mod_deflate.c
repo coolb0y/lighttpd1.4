@@ -99,18 +99,18 @@
 #include "first.h"
 
 #include <sys/types.h>
-#include <sys/stat.h>
 #include "sys-mmap.h"
 #ifdef HAVE_MMAP
 #include "sys-setjmp.h"
 #endif
+#include "sys-stat.h"
 #include "sys-time.h"
+#include "sys-unistd.h" /* <unistd.h> getpid() read() unlink() write() */
 
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <unistd.h>     /* getpid() read() unlink() write() */
 
 #include "base.h"
 #include "ck.h"
@@ -293,10 +293,6 @@ FREE_FUNC(mod_deflate_free) {
     }
 }
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-#define mkdir(x,y) mkdir(x)
-#endif
-
 static int mkdir_for_file (char *fn) {
     for (char *p = fn; (p = strchr(p + 1, '/')) != NULL; ) {
         if (p[1] == '\0') return 0; /* ignore trailing slash */
@@ -308,11 +304,13 @@ static int mkdir_for_file (char *fn) {
     return 0;
 }
 
+#ifndef _WIN32 /* disable on _WIN32 */
 static int mkdir_recursive (char *dir) {
     return 0 == mkdir_for_file(dir) && (0 == mkdir(dir,0700) || errno == EEXIST)
       ? 0
       : -1;
 }
+#endif
 
 static buffer * mod_deflate_cache_file_name(request_st * const r, const buffer *cache_dir, const buffer * const etag) {
     /* XXX: future: for shorter paths into the cache, we could checksum path,
@@ -388,7 +386,9 @@ static void mod_deflate_merge_config_cpv(plugin_config * const pconf, const conf
         pconf->max_loadavg = cpv->v.d;
         break;
       case 8: /* deflate.cache-dir */
+       #ifndef _WIN32 /* disable on _WIN32 */
         pconf->cache_dir = cpv->v.b;
+       #endif
         break;
     #if 0 /*(cpv->k_id remapped in mod_deflate_set_defaults())*/
       case 9: /* compress.filetype */
@@ -802,6 +802,7 @@ SETDEFAULTS_FUNC(mod_deflate_set_defaults) {
                 cpv->k_id = 8; /* deflate.cache-dir */
                 __attribute_fallthrough__
               case 8: /* deflate.cache-dir */
+               #ifndef _WIN32 /* disable on _WIN32 */
                 if (!buffer_is_blank(cpv->v.b)) {
                     buffer *b;
                     *(const buffer **)&b = cpv->v.b;
@@ -816,6 +817,7 @@ SETDEFAULTS_FUNC(mod_deflate_set_defaults) {
                     }
                 }
                 else
+               #endif
                     cpv->v.b = NULL;
                 break;
              #if 0    /*(handled further above)*/
@@ -2187,6 +2189,7 @@ static handler_t mod_deflate_cleanup(request_st * const r, void *p_d) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_deflate_plugin_init(plugin *p);
 int mod_deflate_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

@@ -9,13 +9,12 @@
 #include "gw_backend.h"
 
 #include <sys/types.h>
-#include <sys/stat.h>
 #include "sys-socket.h"
+#include "sys-stat.h"
+#include "sys-unistd.h" /* <unistd.h> */
+#include "sys-wait.h"
 #ifdef HAVE_SYS_UIO_H
 #include <sys/uio.h>
-#endif
-#ifdef HAVE_SYS_WAIT_H
-#include <sys/wait.h>
 #endif
 
 #include <errno.h>
@@ -25,7 +24,10 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
-#include <unistd.h>
+
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
 
 #include "base.h"
 #include "algo_md.h"
@@ -270,8 +272,13 @@ __attribute_cold__
 static void gw_proc_connect_error(request_st * const r, gw_host *host, gw_proc *proc, pid_t pid, int errnum, int debug) {
     const unix_time64_t cur_ts = log_monotonic_secs;
     log_error_st * const errh = r->conf.errh;
-    errno = errnum; /*(for log_perror())*/
-    log_perror(errh, __FILE__, __LINE__,
+  #ifdef _WIN32
+    WSASetLastError(errnum); /*(for log_perror()/log_serror())*/
+    if (errnum == WSAEWOULDBLOCK) errnum = EAGAIN;
+  #else
+    errno = errnum; /*(for log_perror()/log_serror())*/
+  #endif
+    log_serror(errh, __FILE__, __LINE__,
       "establishing connection failed: socket: %s", proc->connection_name->ptr);
 
     if (!proc->is_local) {
@@ -376,7 +383,8 @@ static void gw_proc_waitpid_log(const gw_host * const host, const gw_proc * cons
 }
 
 static int gw_proc_waitpid(gw_host *host, gw_proc *proc, log_error_st *errh) {
-    int rc, status;
+    pid_t rc;
+    int status;
 
     if (!proc->is_local) return 0;
     if (proc->pid <= 0) return 0;
@@ -498,21 +506,29 @@ static int gw_spawn_connection(gw_host * const host, gw_proc * const proc, log_e
 
     gw_fd = fdevent_socket_cloexec(proc->saddr->sa_family, SOCK_STREAM, 0);
     if (-1 == gw_fd) {
-        log_perror(errh, __FILE__, __LINE__, "socket()");
+        log_serror(errh, __FILE__, __LINE__, "socket()");
         return -1;
     }
 
     do {
         status = connect(gw_fd, proc->saddr, proc->saddrlen);
-    } while (-1 == status && errno == EINTR);
+    }
+  #ifdef _WIN32
+    while (-1 == status && WSAGetLastError() == WSAEINTR);
+  #else
+    while (-1 == status && errno == EINTR);
+  #endif
+
+    /* _WIN32 WSAGetLastError() WSAECONNRESET or WSAECONNREFUSED might
+     * or might not indicate presence of socket, so try to unlink unixsocket */
 
     if (-1 == status && errno != ENOENT && proc->unixsocket) {
-        log_perror(errh, __FILE__, __LINE__,
-          "connect %s", proc->unixsocket->ptr);
+        log_serror(errh, __FILE__, __LINE__,
+          "connect() %s", proc->unixsocket->ptr);
         unlink(proc->unixsocket->ptr);
     }
 
-    close(gw_fd);
+    fdio_close_socket(gw_fd);
 
     if (-1 == status) {
         /* server is not up, spawn it  */
@@ -520,29 +536,37 @@ static int gw_spawn_connection(gw_host * const host, gw_proc * const proc, log_e
         uint32_t i;
 
         /* reopen socket */
+
+      #ifdef _WIN32
+        /* Note: not using WSA_FLAG_OVERLAPPED
+         * because we are assigning to hStdInput of child process */
+        gw_fd = WSASocketA(proc->saddr->sa_family, SOCK_STREAM, 0, NULL, 0,
+                           WSA_FLAG_NO_HANDLE_INHERIT);
+      #else
         gw_fd = fdevent_socket_cloexec(proc->saddr->sa_family, SOCK_STREAM, 0);
+      #endif
         if (-1 == gw_fd) {
-            log_perror(errh, __FILE__, __LINE__, "socket()");
+            log_serror(errh, __FILE__, __LINE__, "socket()");
             return -1;
         }
 
         if (fdevent_set_so_reuseaddr(gw_fd, 1) < 0) {
-            log_perror(errh, __FILE__, __LINE__, "socketsockopt()");
-            close(gw_fd);
+            log_serror(errh, __FILE__, __LINE__, "socketsockopt()");
+            fdio_close_socket(gw_fd);
             return -1;
         }
 
         /* create socket */
         if (-1 == bind(gw_fd, proc->saddr, proc->saddrlen)) {
-            log_perror(errh, __FILE__, __LINE__,
-              "bind failed for: %s", proc->connection_name->ptr);
-            close(gw_fd);
+            log_serror(errh, __FILE__, __LINE__,
+              "bind() %s", proc->connection_name->ptr);
+            fdio_close_socket(gw_fd);
             return -1;
         }
 
         if (-1 == listen(gw_fd, host->listen_backlog)) {
-            log_perror(errh, __FILE__, __LINE__, "listen()");
-            close(gw_fd);
+            log_serror(errh, __FILE__, __LINE__, "listen()");
+            fdio_close_socket(gw_fd);
             return -1;
         }
 
@@ -600,6 +624,12 @@ static int gw_spawn_connection(gw_host * const host, gw_proc * const proc, log_e
             env.ptr[env.used] = NULL;
         }
 
+      #ifdef _WIN32
+        int dfd = -2; /*(flag to chdir to script dir on _WIN32)*/
+        proc->pid =
+          fdevent_createprocess(host->args.ptr,
+                                env.ptr, (intptr_t)gw_fd, -1, -1, dfd);
+      #else
         int dfd = fdevent_open_dirname(host->args.ptr[0], 1);/*permit symlinks*/
         if (-1 == dfd) {
             log_perror(errh, __FILE__, __LINE__,
@@ -611,15 +641,17 @@ static int gw_spawn_connection(gw_host * const host, gw_proc * const proc, log_e
           ? fdevent_fork_execve(host->args.ptr[0], host->args.ptr,
                                 env.ptr, gw_fd, -1, -1, dfd)
           : -1;
+      #endif
+        if (-1 == proc->pid)
+            log_perror(errh, __FILE__, __LINE__,
+              "gw-backend failed to start: %s", host->bin_path->ptr);
 
         for (i = 0; i < env.used; ++i) free(env.ptr[i]);
         free(env.ptr);
-        if (-1 != dfd) close(dfd);
-        close(gw_fd);
+        if (dfd >= 0) close(dfd);
+        fdio_close_socket(gw_fd);
 
         if (-1 == proc->pid) {
-            log_error(errh, __FILE__, __LINE__,
-              "gw-backend failed to start: %s", host->bin_path->ptr);
             proc->pid = 0;
             proc->disabled_until = log_monotonic_secs;
             return -1;
@@ -723,11 +755,12 @@ static void gw_proc_kill(gw_host *host, gw_proc *proc) {
         host->unused_procs->prev = proc;
     host->unused_procs = proc;
 
-    kill(proc->pid, host->kill_signal);
+    fdevent_kill(proc->pid, host->kill_signal);
 
     gw_proc_set_state(host, proc, PROC_STATE_KILLED);
 }
 
+#ifdef HAVE_SYS_UN_H
 __attribute_pure__
 static gw_host * unixsocket_is_dup(gw_plugin_data *p, const buffer *unixsocket) {
     if (NULL == p->cvlist) return NULL;
@@ -762,6 +795,7 @@ static gw_host * unixsocket_is_dup(gw_plugin_data *p, const buffer *unixsocket) 
 
     return NULL;
 }
+#endif
 
 static void parse_binpath(char_array *env, const buffer *b) {
     char *start = b->ptr;
@@ -792,6 +826,19 @@ static void parse_binpath(char_array *env, const buffer *b) {
         ck_realloc_u32((void **)&env->ptr, env->used, 2, sizeof(*env->ptr));
     env->ptr[env->used++] = strdup(start);
     env->ptr[env->used] = NULL;
+
+  #ifdef _WIN32
+    /* lighttpd cygwin test environment does not include ".exe" extension */
+    if (NULL == getenv("CYGROOT")) return; /* set in tests/Lighttpd.pm */
+    struct stat st;
+    char *arg0 = env->ptr[0];
+    size_t len = strlen(arg0);
+    if ((len < 4 || 0 != memcmp(arg0+len-4, ".exe", 4))
+        && 0 != stat(arg0, &st) && errno == ENOENT) {
+        ck_realloc_u32((void **)&env->ptr[0], len, 5, 1);
+        memcpy(env->ptr[0]+len, ".exe", 5);
+    }
+  #endif
 }
 
 enum {
@@ -891,7 +938,7 @@ static gw_host * gw_host_get(request_st * const r, gw_extension *extension, int 
        }
       case GW_BALANCE_STICKY:
        { /* source sticky balancing */
-        const buffer * const dst_addr_buf = &r->con->dst_addr_buf;
+        const buffer * const dst_addr_buf = r->dst_addr_buf;
         const uint32_t base_hash =
           gw_hash(BUF_PTR_LEN(dst_addr_buf), DJBHASH_INIT);
         uint32_t last_max = UINT32_MAX;
@@ -968,9 +1015,18 @@ static gw_host * gw_host_get(request_st * const r, gw_extension *extension, int 
 
 static int gw_establish_connection(request_st * const r, gw_host *host, gw_proc *proc, pid_t pid, int gw_fd, int debug) {
     if (-1 == connect(gw_fd, proc->saddr, proc->saddrlen)) {
+      #ifdef _WIN32
+        /* MS returns WSAEWOULDBLOCK instead of WSAEINPROGRESS for connect()
+         * if socket is configured nonblocking */
+        int errnum = WSAGetLastError();
+        if (errnum == WSAEINPROGRESS || errnum == WSAEALREADY
+            || errnum == WSAEWOULDBLOCK || errnum == WSAEINTR)
+      #else
         int errnum = errno;
         if (errnum == EINPROGRESS || errnum == EALREADY || errnum == EINTR
-            || (errnum == EAGAIN && host->unixsocket)) {
+            || (errnum == EAGAIN && host->unixsocket))
+      #endif
+        {
             if (debug > 2) {
                 log_error(r->conf.errh, __FILE__, __LINE__,
                   "connect delayed; will continue later: %s",
@@ -1006,7 +1062,7 @@ static void gw_restart_dead_proc(gw_host * const host, log_error_st * const errh
                 int sig = (proc->disabled_until <= 8)
                   ? host->kill_signal
                   : proc->disabled_until <= 16 ? SIGTERM : SIGKILL;
-                kill(proc->pid, sig);
+                fdevent_kill(proc->pid, sig);
             }
             break;
         case PROC_STATE_DIED_WAIT_FOR_PID:
@@ -1159,9 +1215,8 @@ void gw_plugin_config_free(gw_plugin_config *s) {
 
                 for (proc = host->first; proc; proc = proc->next) {
                     if (proc->pid > 0) {
-                        kill(proc->pid, host->kill_signal);
+                        fdevent_kill(proc->pid, host->kill_signal);
                     }
-
                     if (proc->is_local && proc->unixsocket) {
                         unlink(proc->unixsocket->ptr);
                     }
@@ -1169,7 +1224,7 @@ void gw_plugin_config_free(gw_plugin_config *s) {
 
                 for (proc = host->unused_procs; proc; proc = proc->next) {
                     if (proc->pid > 0) {
-                        kill(proc->pid, host->kill_signal);
+                        fdevent_kill(proc->pid, host->kill_signal);
                     }
                     if (proc->is_local && proc->unixsocket) {
                         unlink(proc->unixsocket->ptr);
@@ -1436,6 +1491,22 @@ int gw_set_defaults_backend(server *srv, gw_plugin_data *p, const array *a, gw_p
                     break;
                   case 15:/* bin-copy-environment */
                     host->bin_env_copy = cpv->v.a;
+                   #if defined(__CYGWIN__) || defined(_WIN32)
+                    if (host->bin_env_copy->used) {
+                        uint32_t k;
+                        for (k = 0; k < cpv->v.a->used; ++k) {
+                            /* search for SYSTEMROOT */
+                            data_string *ds = (data_string *)cpv->v.a->data[k];
+                            if (0 == strcmp(ds->value.ptr, "SYSTEMROOT"))
+                                break;
+                        }
+                        if (k == cpv->v.a->used) {
+                            array *e;
+                            *(const array **)&e = cpv->v.a;
+                            array_insert_value(e, CONST_STR_LEN("SYSTEMROOT"));
+                        }
+                    }
+                   #endif
                     break;
                   case 16:/* broken-scriptfilename */
                     host->break_scriptfilename_for_php = (0 != cpv->v.u);
@@ -1519,6 +1590,7 @@ int gw_set_defaults_backend(server *srv, gw_plugin_data *p, const array *a, gw_p
             }
 
             if (host->unixsocket) {
+              #ifdef HAVE_SYS_UN_H
                 /* unix domain socket */
                 struct sockaddr_un un;
 
@@ -1546,6 +1618,12 @@ int gw_set_defaults_backend(server *srv, gw_plugin_data *p, const array *a, gw_p
                 }
 
                 host->family = AF_UNIX;
+              #else
+                log_error(srv->errh, __FILE__, __LINE__,
+                  "unixsocket not supported on this platform: %s = (%s => (%s ( ...",
+                  cpkkey, da_ext->key.ptr, da_host->key.ptr);
+                goto error;
+              #endif
             } else {
                 /* tcp/ip */
 
@@ -1586,6 +1664,9 @@ int gw_set_defaults_backend(server *srv, gw_plugin_data *p, const array *a, gw_p
                       "and is executable by lighttpd)", host->bin_path->ptr);
                 }
 
+              #ifdef _WIN32
+                UNUSED(sh_exec); /*(no "exec " in cmd.exe; skip)*/
+              #else
                 if (sh_exec) {
                     /*(preserve prior behavior for SCGI exec of command)*/
                     /*(admin should really prefer to put
@@ -1607,6 +1688,7 @@ int gw_set_defaults_backend(server *srv, gw_plugin_data *p, const array *a, gw_p
                            host->bin_path->ptr, buffer_clen(host->bin_path)+1);
                     host->args.ptr[3] = NULL;
                 }
+              #endif
 
                 if (host->min_procs > host->max_procs)
                     host->min_procs = host->max_procs;
@@ -2015,10 +2097,20 @@ static handler_t gw_write_request(gw_handler_ctx * const hctx, request_st * cons
             off_t bytes_out = hctx->wb.bytes_out;
             if (r->con->srv->network_backend_write(hctx->fd, &hctx->wb,
                                                    MAX_WRITE_LIMIT, errh) < 0) {
-                switch(errno) {
+              #ifdef _WIN32
+                switch(WSAGetLastError())
+              #else
+                switch(errno)
+              #endif
+                {
+                #ifdef _WIN32
+                case WSAENOTCONN:
+                case WSAECONNRESET:
+                #else
                 case EPIPE:
                 case ENOTCONN:
                 case ECONNRESET:
+                #endif
                     /* the connection got dropped after accept()
                      * we don't care about that --
                      * if you accept() it, you have to handle it.
@@ -2054,7 +2146,8 @@ static handler_t gw_write_request(gw_handler_ctx * const hctx, request_st * cons
                       & FDEVENT_STREAM_REQUEST_POLLIN)) {
                     r->conf.stream_request_body |=
                         FDEVENT_STREAM_REQUEST_POLLIN;
-                    r->con->is_readable = 1; /* trigger optimistic client read */
+                    if (r->http_version <= HTTP_VERSION_1_1)
+                        r->con->is_readable = 1;/*trigger optimistic client rd*/
                 }
             }
             if (0 == wblen) {

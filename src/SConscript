@@ -64,6 +64,8 @@ common_src = Split("base64.c buffer.c burl.c log.c \
 	http-header-glue.c \
 	http_cgi.c \
 	http_date.c \
+	plugin.c \
+	reqpool.c \
 	request.c \
 	sock_addr.c \
 	rand.c \
@@ -73,8 +75,7 @@ common_src = Split("base64.c buffer.c burl.c log.c \
 	ck.c \
 ")
 
-src = Split("server.c response.c connections.c h2.c reqpool.c \
-	plugin.c \
+src = Split("server.c response.c connections.c h1.c h2.c \
 	sock_addr_cache.c \
 	ls-hpack/lshpack.c \
 	algo_xxhash.c \
@@ -118,6 +119,7 @@ modules = {
 	'mod_deflate' : { 'src' : [ 'mod_deflate.c' ], 'lib' : [ env['LIBZ'], env['LIBZSTD'], env['LIBBZ2'], env['LIBBROTLI'], env['LIBDEFLATE'], 'm' ] },
 	'mod_dirlisting' : { 'src' : [ 'mod_dirlisting.c' ] },
 	'mod_extforward' : { 'src' : [ 'mod_extforward.c' ] },
+	'mod_h2' : { 'src' : [ 'h2.c', 'ls-hpack/lshpack.c', 'algo_xxhash.c' ], 'lib' : [ env['LIBXXHASH'] ] },
 	'mod_proxy' : { 'src' : [ 'mod_proxy.c' ] },
 	'mod_rrdtool' : { 'src' : [ 'mod_rrdtool.c' ] },
 	'mod_sockproxy' : { 'src' : [ 'mod_sockproxy.c' ] },
@@ -183,7 +185,12 @@ staticsrc = src + common_src
 
 staticlib = copy(env['LIBS'])
 staticinit = ''
+staticsrc += builtin_mods
+for module in builtin_mods:
+	staticinit += "PLUGIN_INIT(%s)\n"%module[0:-2]
 for module in modules.keys():
+	if module == "mod_h2":
+		continue
 	staticsrc += modules[module]['src']
 	staticinit += "PLUGIN_INIT(%s)\n"%module
 	if 'lib' in modules[module]:

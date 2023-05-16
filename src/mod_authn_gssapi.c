@@ -22,7 +22,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include "sys-unistd.h" /* <unistd.h> */
 
 #include <krb5.h>
 #include <gssapi.h>
@@ -777,7 +777,7 @@ static handler_t mod_authn_gssapi_basic(request_st * const r, void *p_d, const h
             /* ret == KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN or no authz rules match */
             log_error(r->conf.errh, __FILE__, __LINE__,
               "password doesn't match for %s username: %s IP: %s",
-              r->uri.path.ptr, username->ptr, r->con->dst_addr_buf.ptr);
+              r->uri.path.ptr, username->ptr, r->dst_addr_buf->ptr);
             return mod_authn_gssapi_send_401_unauthorized_basic(r);
         }
 }
@@ -796,6 +796,7 @@ REQUEST_FUNC(mod_authn_gssapi_handle_reset) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_authn_gssapi_plugin_init(plugin *p);
 int mod_authn_gssapi_plugin_init(plugin *p) {
     p->version     = LIGHTTPD_VERSION_ID;

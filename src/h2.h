@@ -72,7 +72,7 @@ typedef enum {
 } request_h2state_t;
 
 struct h2con {
-    request_st *r[8];
+    request_st *r[8]; /* must match request.h:struct hxcon */
     uint32_t rused;
 
     uint32_t h2_cid;
@@ -89,31 +89,6 @@ struct h2con {
     struct lshpack_enc encoder;
     unix_time64_t half_closed_ts;
 };
-
-void h2_send_goaway (connection *con, request_h2error_t e);
-
-int h2_parse_frames (connection *con);
-
-int h2_want_read (connection *con);
-
-void h2_init_con (request_st * restrict h2r, connection * restrict con, const buffer * restrict http2_settings);
-
-int h2_send_1xx (request_st *r, connection *con);
-
-void h2_send_100_continue (request_st *r, connection *con);
-
-void h2_send_headers (request_st *r, connection *con);
-
-uint32_t h2_send_cqdata (request_st *r, connection *con, struct chunkqueue *cq, uint32_t dlen);
-
-void h2_send_end_stream (request_st *r, connection *con);
-
-void h2_retire_stream (request_st *r, connection *con);
-
-void h2_retire_con (request_st *h2r, connection *con);
-
-__attribute_cold__
-__attribute_noinline__
-int h2_check_con_upgrade_h2c (request_st *r);
+typedef struct h2con h2con;
 
 #endif

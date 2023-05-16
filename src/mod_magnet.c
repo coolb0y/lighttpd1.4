@@ -10,7 +10,6 @@
 #include "chunk.h"
 #include "ck.h"
 #include "fdevent.h"
-#include "h2.h"
 #include "http_chunk.h"
 #include "http_etag.h"
 #include "http_header.h"
@@ -201,6 +200,12 @@ SETDEFAULTS_FUNC(mod_magnet_set_defaults) {
 #endif
 
 #if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM < 502
+#ifdef __has_include
+#if __has_include(<luajit.h>)
+#include <luajit.h>
+#endif
+#endif
+#if !defined(LUAJIT_VERSION_NUM) || LUAJIT_VERSION_NUM < 20005
 static lua_Integer
 lua_tointegerx (lua_State * const L, int idx, int *isnum)
 {
@@ -209,6 +214,7 @@ lua_tointegerx (lua_State * const L, int idx, int *isnum)
     *isnum = lua_isnumber(L, idx);
     return *isnum ? lua_tointeger(L, idx) : 0;
 }
+#endif
 #endif
 
 #if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM < 502
@@ -1745,7 +1751,7 @@ magnet_req_item_get (lua_State *L)
             return 1;
         }
         if (0 == memcmp(k, "stream_id", 9)) {
-            lua_pushinteger(L, (lua_Integer)r->h2id);
+            lua_pushinteger(L, (lua_Integer)r->x.h2.id);
             return 1;
         }
         if (0 == memcmp(k, "req_count", 9)) {
@@ -1966,9 +1972,9 @@ magnet_env_get_buffer_by_id (request_st * const r, const int id)
 	case MAGNET_ENV_REQUEST_URI:      dest = &r->target; break;
 	case MAGNET_ENV_REQUEST_ORIG_URI: dest = &r->target_orig; break;
 	case MAGNET_ENV_REQUEST_PATH_INFO: dest = &r->pathinfo; break;
-	case MAGNET_ENV_REQUEST_REMOTE_ADDR: dest = &r->con->dst_addr_buf; break;
+	case MAGNET_ENV_REQUEST_REMOTE_ADDR: dest = r->dst_addr_buf; break;
 	case MAGNET_ENV_REQUEST_REMOTE_PORT:
-		buffer_append_int(dest, sock_addr_get_port(&r->con->dst_addr));
+		buffer_append_int(dest, sock_addr_get_port(r->dst_addr));
 		break;
 	case MAGNET_ENV_REQUEST_SERVER_ADDR: /* local IP without port */
 	case MAGNET_ENV_REQUEST_SERVER_PORT:
@@ -2031,12 +2037,11 @@ static int
 magnet_env_set_raddr_by_id (lua_State *L, request_st * const r, const int id,
                             const const_buffer * const val)
 {
-    connection * const con = r->con;
     switch (id) {
       case MAGNET_ENV_REQUEST_REMOTE_ADDR:
        #ifdef HAVE_SYS_UN_H
         if (val->len && *val->ptr == '/'
-            && 0 == sock_addr_assign(&con->dst_addr, AF_UNIX, 0, val->ptr)) {
+            && 0 == sock_addr_assign(r->dst_addr, AF_UNIX, 0, val->ptr)) {
         }
         else
        #endif
@@ -2046,7 +2051,7 @@ magnet_env_set_raddr_by_id (lua_State *L, request_st * const r, const int id,
             if (1 == sock_addr_from_str_numeric(&saddr, val->ptr, r->conf.errh)
                 && saddr.plain.sa_family != AF_UNSPEC) {
                 sock_addr_set_port(&saddr, 0);
-                memcpy(&con->dst_addr, &saddr, sizeof(sock_addr));
+                memcpy(r->dst_addr, &saddr, sizeof(sock_addr));
             }
             else {
                 return luaL_error(L,
@@ -2054,11 +2059,11 @@ magnet_env_set_raddr_by_id (lua_State *L, request_st * const r, const int id,
                                   val->ptr);
             }
         }
-        buffer_copy_string_len(&con->dst_addr_buf, val->ptr, val->len);
+        buffer_copy_string_len(r->dst_addr_buf, val->ptr, val->len);
         config_cond_cache_reset_item(r, COMP_HTTP_REMOTE_IP);
         break;
       case MAGNET_ENV_REQUEST_REMOTE_PORT:
-        sock_addr_set_port(&con->dst_addr, (unsigned short)atoi(val->ptr));
+        sock_addr_set_port(r->dst_addr, (unsigned short)atoi(val->ptr));
         break;
       default:
         break;
@@ -2678,30 +2683,32 @@ static int
 magnet_request_iter (lua_State *L)
 {
     /* upvalue 1: (connection *) in linked list
-     * upvalue 2: index into h2con->r[]
+     * upvalue 2: index into hxcon->r[]
      * upvalue 3: request userdata
      * upvalue 4: request table (references r in userdata) */
     connection *con = lua_touserdata(L, lua_upvalueindex(1));
 
-    /* skip over HTTP/2 connections with no active requests */
-    while (con && con->h2 && 0 == con->h2->rused)
+    /* skip over HTTP/2 and HTTP/3 connections with no active requests */
+    while (con && con->hx && 0 == con->hx->rused)
         con = con->next;
     if (NULL == con)
         return 0;
 
     /* set (request_st *)r */
     int32_t i = -1;
-    if (con->h2) {
-        /* get index into h2con->r[] */
+    if (con->hx) {
+        /* get index into hxcon->r[] */
         i = lua_tointeger(L, lua_upvalueindex(2));
         /* set (request_st *)r in userdata */
-        if (-1 == i)
+        /* step to next index into hxcon->r[] */
+        if (-1 == i) {
             *(request_st **)lua_touserdata(L,lua_upvalueindex(3))=&con->request;
-        else
-            *(request_st **)lua_touserdata(L,lua_upvalueindex(3))=con->h2->r[i];
-        /* step to next index into h2con->r[] */
-        if ((uint32_t)++i == con->h2->rused)
-            i = -1;
+            ++i; /*(rused != 0 checked above)*/
+        }
+        else {
+            *(request_st **)lua_touserdata(L,lua_upvalueindex(3))=con->hx->r[i];
+            if ((uint32_t)++i == con->hx->rused) i = -1;
+        }
         lua_pushinteger(L, i);
         lua_replace(L, lua_upvalueindex(2));
     }
@@ -3386,6 +3393,7 @@ SUBREQUEST_FUNC(mod_magnet_handle_subrequest) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_magnet_plugin_init(plugin *p);
 int mod_magnet_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

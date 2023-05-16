@@ -233,8 +233,14 @@ void buffer_append_iovec(buffer * const restrict b, const struct const_iovec * c
 
 void buffer_append_path_len(buffer * restrict b, const char * restrict a, size_t alen) {
     char * restrict s = buffer_string_prepare_append(b, alen+1);
+  #ifdef _WIN32
+    const int aslash = (alen && (a[0] == '/' || a[0] == '\\'));
+    if (b->used > 1 && (s[-1] == '/' || s[-1] == '\\'))
+  #else
     const int aslash = (alen && a[0] == '/');
-    if (b->used > 1 && s[-1] == '/') {
+    if (b->used > 1 && s[-1] == '/')
+  #endif
+    {
         if (aslash) {
             ++a;
             --alen;
@@ -900,7 +906,7 @@ void buffer_path_simplify(buffer *b)
         return;
     }
 
-  #if defined(__WIN32) || defined(__CYGWIN__)
+  #if defined(_WIN32) || defined(__CYGWIN__)
     /* cygwin is treating \ and / the same, so we have to that too */
     for (char *p = b->ptr; *p; p++) {
         if (*p == '\\') *p = '/';

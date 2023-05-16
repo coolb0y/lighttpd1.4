@@ -2,7 +2,6 @@
 
 #include "base.h"
 #include "fdevent.h"
-#include "h2.h"
 #include "http_chunk.h"
 #include "http_header.h"
 #include "log.h"
@@ -170,13 +169,16 @@ static void mod_status_get_multiplier(buffer *b, double avg, int size) {
     buffer_append_string_len(b, unit, 2);
 }
 
-static void mod_status_html_rtable_r (buffer * const b, const request_st * const r, const connection * const con, const unix_time64_t cur_ts) {
+static void mod_status_html_rtable_r (buffer * const b, const request_st * const r, const unix_time64_t cur_ts) {
     buffer_append_str3(b, CONST_STR_LEN("<tr><td class=\"string\">"),
-                          BUF_PTR_LEN(&con->dst_addr_buf),
+                          BUF_PTR_LEN(r->dst_addr_buf),
                           CONST_STR_LEN("</td><td class=\"int\">"));
 
     if (r->reqbody_length) {
-        buffer_append_int(b, (r->http_version <= HTTP_VERSION_1_1 || r->h2id)
+        buffer_append_int(b, (r->http_version <= HTTP_VERSION_1_1
+                              || (r->http_version == HTTP_VERSION_2
+                                  && r->x.h2.id)
+                             )
                              ? r->reqbody_queue.bytes_in
                              : http_request_stats_bytes_in(r));
         buffer_append_char(b, '/');
@@ -239,13 +241,13 @@ static void mod_status_html_rtable (request_st * const rq, const server * const 
     buffer_clear(b);
     for (const connection *con = srv->conns; con; con = con->next) {
         const request_st * const r = &con->request;
-        h2con * const h2c = con->h2;
+        hxcon * const h2c = con->hx;
         { /*(r->http_version <= HTTP_VERSION_1_1 or HTTP/2 stream id 0)*/
             if (buffer_string_space(b) < 4096) {
                 http_chunk_append_mem(rq, BUF_PTR_LEN(b));
                 buffer_clear(b);
             }
-            mod_status_html_rtable_r(b, r, con, cur_ts);
+            mod_status_html_rtable_r(b, r, cur_ts);
         }
         if (NULL != h2c) {
             for (uint32_t j = 0, rused = h2c->rused; j < rused; ++j) {
@@ -253,7 +255,7 @@ static void mod_status_html_rtable (request_st * const rq, const server * const 
                     http_chunk_append_mem(rq, BUF_PTR_LEN(b));
                     buffer_clear(b);
                 }
-                mod_status_html_rtable_r(b, h2c->r[j], con, cur_ts);
+                mod_status_html_rtable_r(b, h2c->r[j], cur_ts);
             }
         }
     }
@@ -432,7 +434,11 @@ static handler_t mod_status_handle_server_status_html(server *srv, request_st * 
 	ts = srv->startup_ts;
 
 	struct tm tm;
+  #ifdef __MINGW32__
+	buffer_append_strftime(b, "%Y-%m-%d %H:%M:%S", localtime64_r(&ts, &tm));
+  #else
 	buffer_append_strftime(b, "%F %T", localtime64_r(&ts, &tm));
+  #endif
 	buffer_append_string_len(b, CONST_STR_LEN("</td></tr>\n"
 	                                          "<tr><th colspan=\"2\">absolute (since start)</th></tr>\n"
 	                                          "<tr><td>Requests</td><td class=\"string\">"));
@@ -843,6 +849,7 @@ REQUESTDONE_FUNC(mod_status_account) {
 
 
 __attribute_cold__
+__declspec_dllexport__
 int mod_status_plugin_init(plugin *p);
 int mod_status_plugin_init(plugin *p) {
 	p->version     = LIGHTTPD_VERSION_ID;

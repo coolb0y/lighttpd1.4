@@ -12,7 +12,7 @@ except NameError:
 	string_types = str
 
 package = 'lighttpd'
-version = '1.4.69'
+version = '1.4.70'
 
 underscorify_reg = re.compile('[^A-Z0-9]')
 def underscorify(id):
@@ -431,6 +431,9 @@ if 1:
 		'mmap',
 		'pipe2',
 		'poll',
+		'posix_spawn',
+		'posix_spawn_file_actions_addclosefrom_np',
+		'posix_spawn_file_actions_addfchdir_np',
 		'pread',
 		'preadv',
 		'pwrite',
