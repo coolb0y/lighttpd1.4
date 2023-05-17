@@ -86,6 +86,8 @@ void syslog(int priority, const char *format, ...)
 
 #endif /* HAVE_SYSLOG_H && WITH_ANDROID_NDK_SYSLOG_INTERCEPT */
 
+#define main // To prevent renaming of server_main() into main() in server.c
+
 #ifdef WITH_JAVA_NATIVE_INTERFACE
 
 #include <jni.h>
@@ -147,22 +149,17 @@ JNIEXPORT void JNICALL Java_com_lighttpd_Server_gracefulShutdown(
     graceful_shutdown = 1;
 }
 
-#define main // To prevent renaming of server_main() into main() in server.c
-
-#define server_main(a,b) server_main(int argc, char ** argv, JNIEnv *jenv)
+#define server_main(a,b) server_main(a, b, JNIEnv *jenv)
 
 #else
 
-int lighttpd_main (int argc, char ** argv, void (*callback)());
-#define main(a,b) \
-  lighttpd_main (int argc, char ** argv, void (*callback)())
+int server_main(int argc, char ** argv, void (*callback)());
 
-static void lighttpd_main_loop (server * const srv, void (*callback)())
+static void server_status_running (void (*callback)())
 {
     if (callback) callback();
-    server_main_loop(srv);
 }
-#define server_main_loop(srv) lighttpd_main_loop((srv), callback);
+#define server_status_running(srv) server_status_running(callback);
 
 __attribute_cold__
 int lighttpd_launch(
@@ -177,8 +174,10 @@ int lighttpd_launch(
 
     optind = 1;
     char *argv[] = { "lighttpd", "-D", "-f", (char*)config_path, NULL };
-	return lighttpd_main(4, argv, callback);
+	return server_main(4, argv, callback);
 }
+
+#define server_main(a,b) server_main(a, b, void (*callback)())
 
 void lighttpd_graceful_shutdown() {
   graceful_shutdown = 1;

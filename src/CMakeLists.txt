@@ -225,7 +225,14 @@ check_include_files(spawn.h HAVE_SPAWN_H)
 if(HAVE_SPAWN_H)
 check_function_exists(posix_spawn HAVE_POSIX_SPAWN)
 check_function_exists(posix_spawn_file_actions_addclosefrom_np HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP)
+
+# The following check somehow finds the function when building for iOS on Mac,
+# however this function is not available for iOS.
+if(NOT CMAKE_SYSTEM_NAME MATCHES "iOS"
+AND NOT CMAKE_SYSTEM_NAME MATCHES "Darwin")
 check_function_exists(posix_spawn_file_actions_addfchdir_np HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDFCHDIR_NP)
+endif()
+
 endif()
 
 set(CMAKE_EXTRA_INCLUDE_FILES time.h)
