@@ -430,6 +430,15 @@ int fdevent_set_stdin_stdout_stderr(int fdin, int fdout, int fderr) {
 }
 
 
+/* iOS does not allow subprocess creation; avoid compiling advanced interfaces*/
+#if defined(__APPLE__) && defined(__MACH__)
+#include <TargetConditionals.h> /* TARGET_OS_IPHONE, TARGET_OS_MAC */
+#if TARGET_OS_IPHONE            /* iOS, tvOS, or watchOS device */
+#undef HAVE_POSIX_SPAWN
+#endif
+#endif
+
+
 #include <stdio.h>      /* perror() rename() */
 #include <signal.h>     /* signal() kill() */
 #ifdef HAVE_POSIX_SPAWN
@@ -442,6 +451,7 @@ int fdevent_rename(const char *oldpath, const char *newpath) {
 }
 
 
+#ifdef HAVE_POSIX_SPAWN
 #if !defined(HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP) \
  && defined(POSIX_SPAWN_CLOEXEC_DEFAULT) /* Mac OS */
 __attribute_noinline__
@@ -457,6 +467,7 @@ static int fdevent_cloexec_default_prep (posix_spawn_file_actions_t *file_action
     rc = posix_spawn_file_actions_addclose(file_actions, 3+stdfd);
     return rc;
 }
+#endif
 #endif
 
 
@@ -516,12 +527,12 @@ pid_t fdevent_fork_execve(const char *name, char *argv[], char *envp[], int fdin
        #endif
         && 0 == (rc = sigemptyset(&sigs))
         && 0 == (rc = posix_spawnattr_setsigmask(&attr, &sigs))
-      #ifdef __linux__
-        /* linux appears to walk all signals and to query and preserve some
+      #if defined(__GLIBC__) \
+       && (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 24 && __GLIBC_MINOR__ <= 37)
+        /* glibc appears to walk all signals and to query and preserve some
          * sigaction flags even if setting to SIG_DFL, though if specified
          * in posix_spawnattr_setsigdefault(), resets to SIG_DFL without query.
-         * Therefore, resetting all signals results in about 1/2 the syscalls.
-         * (FreeBSD appears more efficient.  Unverified on other platforms.) */
+         * Therefore, resetting all signals results in about 1/2 the syscalls.*/
         && 0 == (rc = sigfillset(&sigs))
       #else
         /*(force reset signals to SIG_DFL if server.c set to SIG_IGN)*/
