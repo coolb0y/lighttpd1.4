@@ -540,53 +540,11 @@ static void config_compat_module_load (server *srv) {
 }
 
 static void config_deprecate_module_compress (server *srv) {
-    int mod_compress_idx = -1;
-    int mod_deflate_idx = -1;
+    /* replace "mod_compress" value with "mod_deflate" value */
     for (uint32_t i = 0; i < srv->srvconf.modules->used; ++i) {
         buffer *m = &((data_string *)srv->srvconf.modules->data[i])->value;
         if (buffer_eq_slen(m, CONST_STR_LEN("mod_compress")))
-            mod_compress_idx = (int)i;
-        else if (buffer_eq_slen(m, CONST_STR_LEN("mod_deflate")))
-            mod_deflate_idx = (int)i;
-    }
-    if (mod_compress_idx < 0) return;
-
-    int has_compress_directive = 0;
-    for (uint32_t i = 0; i < srv->config_context->used; ++i) {
-        const data_config *config =
-          (data_config const *)srv->config_context->data[i];
-        for (uint32_t j = 0; j < config->value->used; ++j) {
-            buffer *k = &config->value->data[j]->key;
-            if (0 == strncmp(k->ptr, "compress.", sizeof("compress.")-1)) {
-                has_compress_directive = 1;
-                break;
-            }
-        }
-        if (has_compress_directive) {
-            log_error(srv->errh, __FILE__, __LINE__,
-              "Warning: \"mod_compress\" is DEPRECATED and has been replaced "
-              "with \"mod_deflate\".  A future release of lighttpd 1.4.x will "
-              "not contain mod_compress and lighttpd may fail to start up");
-            break;
-        }
-    }
-
-    if (mod_deflate_idx >= 0 || !has_compress_directive) {
-        /* create new modules value list without mod_compress */
-        array *a = array_init(srv->srvconf.modules->used-1);
-        for (uint32_t i = 0; i < srv->srvconf.modules->used; ++i) {
-            buffer *m = &((data_string *)srv->srvconf.modules->data[i])->value;
-            if (buffer_eq_slen(m, CONST_STR_LEN("mod_compress")))
-                continue;
-            array_insert_value(a, BUF_PTR_LEN(m));
-        }
-        array_free(srv->srvconf.modules);
-        srv->srvconf.modules = a;
-    }
-    else {
-        /* replace "mod_compress" value with "mod_deflate" value */
-        buffer *m = &((data_string *)srv->srvconf.modules->data[mod_compress_idx])->value;
-        buffer_copy_string_len(m, CONST_STR_LEN("mod_deflate"));
+            buffer_copy_string_len(m, CONST_STR_LEN("mod_deflate"));
     }
 }
 
@@ -962,12 +920,11 @@ static int config_insert_srvconf(server *srv) {
     if (config_feature_bool(srv, "server.h2proto", 1))
         array_insert_value(srv->srvconf.modules, CONST_STR_LEN("mod_h2"));
 
+    config_deprecate_module_compress(srv);
     config_check_module_duplicates(srv);
 
     if (srv->srvconf.compat_module_load)
         config_compat_module_load(srv);
-
-    config_deprecate_module_compress(srv);
 
     if (srv->srvconf.http_url_normalize)
         config_burl_normalize_cond(srv);
@@ -977,6 +934,48 @@ static int config_insert_srvconf(server *srv) {
 
     free(srvplug.cvlist);
     return rc;
+}
+
+__attribute_cold__
+static void config_mimetypes_default(array * const a) {
+    static const char * const mimetypes_default[] = {
+        ".html",  "text/html"
+       ,".htm",   "text/html"
+       ,".txt",   "text/plain;charset=utf-8"
+       ,".text",  "text/plain;charset=utf-8"
+       ,".css",   "text/css;charset=utf-8"
+       ,".js",    "text/javascript"
+       ,".mjs",   "text/javascript"
+       ,".xml",   "text/xml"
+       ,".jpg",   "image/jpeg"
+       ,".jpeg",  "image/jpeg"
+       ,".png",   "image/png"
+       ,".gif",   "image/gif"
+       ,".svg",   "image/svg+xml"
+       ,".svgz",  "image/svg+xml"
+       ,".json",  "application/json"
+       ,".dtd",   "application/xml-dtd"
+       ,".pdf",   "application/pdf"
+       ,".woff",  "font/woff"
+       ,".woff2", "font/woff2"
+       ,".md",    "text/markdown;charset=utf-8"
+       ,".ico",   "image/x-icon" /* alt: "image/vnd.microsoft.icon" */
+       ,"README", "text/plain;charset=utf-8"
+
+      #if 0
+        /* intentionally omit catch-all to signal elsewhere internally
+         * to omit sending caching headers such as ETag, Last-Modified */
+       ,"",       "application/octet-stream"
+      #endif
+    };
+
+    uint32_t i = 0;
+    do {
+        array_set_key_value(a, mimetypes_default[i],
+                               strlen(mimetypes_default[i]),
+                               mimetypes_default[i+1],
+                               strlen(mimetypes_default[i+1]));
+    } while ((i+=2) < sizeof(mimetypes_default)/sizeof(*mimetypes_default));
 }
 
 static int config_insert(server *srv) {
@@ -1235,7 +1234,7 @@ static int config_insert(server *srv) {
       | (srv->srvconf.http_host_normalize  ?  HTTP_PARSEOPT_HOST_NORMALIZE  :0)
       | (srv->srvconf.http_method_get_body ?  HTTP_PARSEOPT_METHOD_GET_BODY :0);
     p->defaults.http_parseopts |= srv->srvconf.http_url_normalize;
-    p->defaults.mimetypes = &srv->srvconf.empty_array; /*(must not be NULL)*/
+    p->defaults.mimetypes = &srv->srvconf.mimetypes_default;/*must not be NULL*/
     p->defaults.h2proto = srv->srvconf.h2proto;
 
     /* initialize p->defaults from global config context */
@@ -1244,6 +1243,9 @@ static int config_insert(server *srv) {
         if (-1 != cpv->k_id)
             config_merge_config(&p->defaults, cpv);
     }
+
+    if (p->defaults.mimetypes == &srv->srvconf.mimetypes_default)
+        config_mimetypes_default(&srv->srvconf.mimetypes_default);
 
     /* (after processing config defaults) */
     p->defaults.max_request_field_size = srv->srvconf.max_request_field_size;
@@ -1567,6 +1569,7 @@ void config_free(server *srv) {
     array_free(srv->srvconf.config_touched);
     array_free(srv->srvconf.modules);
     array_free(srv->srvconf.upload_tempdirs);
+    array_free_data(&srv->srvconf.mimetypes_default);
   #ifdef HAVE_PCRE2_H
     if (NULL == srv->match_data) pcre2_match_data_free(srv->match_data);
   #endif
