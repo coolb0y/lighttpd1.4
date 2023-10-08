@@ -1049,6 +1049,7 @@ add_executable(test_common
 	t/test_burl.c
 	t/test_http_header.c
 	t/test_http_kv.c
+	t/test_http_range.c
 	t/test_keyvalue.c
 	t/test_request.c
 	log.c

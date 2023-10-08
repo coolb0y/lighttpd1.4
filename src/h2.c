@@ -233,6 +233,7 @@ static const int8_t lshpack_idx_http_header[] = {
 };
 
 
+__attribute_returns_nonnull__
 static request_st * h2_init_stream (request_st * const h2r, connection * const con);
 
 
@@ -791,7 +792,7 @@ h2_recv_window_update (connection * const con, const uint8_t * const s, const ui
         if (NULL == r) {
             if (h2c->h2_cid < id && 0 == h2c->sent_goaway)
                 h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
-          #if 0
+          #ifdef H2SPEC
             /*(needed for h2spec if testing with response < 16k+1 over TLS
              * or response <= socket send buffer size over cleartext, due to
              * completing response too quickly for the test frame sequence) */
@@ -1518,14 +1519,34 @@ h2_parse_headers_frame (request_st * const restrict r, const unsigned char *psrc
     rq->bytes_in  += (off_t)hpctx.hlen;
     rq->bytes_out += (off_t)hpctx.hlen;
 
-    if (0 == r->http_status && LSHPACK_OK == rc && !hpctx.trailers) {
-        if (hpctx.pseudo)
-            r->http_status =
-              http_request_validate_pseudohdrs(r, hpctx.scheme,
-                                               hpctx.http_parseopts);
-        if (0 == r->http_status)
-            http_request_headers_process_h2(r, r->con->proto_default_port);
-    }
+    if (hpctx.trailers)
+        return;
+
+    if (hpctx.pseudo && 0 == r->http_status)
+        r->http_status =
+          http_request_validate_pseudohdrs(r, hpctx.scheme,
+                                           hpctx.http_parseopts);
+
+  #ifdef H2SPEC
+    /* RFC 7540 Section 8. HTTP Message Exchanges
+     * 8.1.2.6. Malformed Requests and Responses
+     * RFC 9113 Section 8. Expressing HTTP Semantics in HTTP/2
+     * 8.1.1. Malformed Messages
+     *   For malformed requests, a server MAY send an HTTP
+     *   response prior to closing or resetting the stream.
+     * However, h2spec expects stream PROTOCOL_ERROR.
+     * (This is unfortunate, since we would rather send
+     *  400 Bad Request which tells client *do not* retry
+     *  the bad request without modification)
+     * https://github.com/summerwind/h2spec/issues/120
+     * https://github.com/summerwind/h2spec/issues/121
+     * https://github.com/summerwind/h2spec/issues/122
+     */
+    if (__builtin_expect( (400 == r->http_status), 0))
+        h2_send_rst_stream(r, r->con, H2_E_PROTOCOL_ERROR);
+  #endif
+
+    http_request_headers_process_h2(r, r->con->proto_default_port);
 }
 
 
@@ -1569,12 +1590,16 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
          *      GOAWAY, e.g. might avoid allocating (request_st *r) */
         r = h2_init_stream(h2r, con);
         r->x.h2.id = id;
-        r->x.h2.state = (s[4] & H2_FLAG_END_STREAM)
-          ? H2_STATE_HALF_CLOSED_REMOTE
-          : H2_STATE_OPEN;
-        r->state = (0 == r->reqbody_length)
-          ? CON_STATE_HANDLE_REQUEST
-          : CON_STATE_READ_POST;
+        if (s[4] & H2_FLAG_END_STREAM) {
+            r->x.h2.state = H2_STATE_HALF_CLOSED_REMOTE;
+            r->state = CON_STATE_HANDLE_REQUEST;
+            r->reqbody_length = 0;
+        }
+        else {
+            r->x.h2.state = H2_STATE_OPEN;
+            r->state = CON_STATE_READ_POST;
+            r->reqbody_length = -1;
+        }
         /* Note: timestamps here are updated only after receipt of entire header
          * (HEADERS frame might have been sent in multiple packets
          *  and CONTINUATION frames may have been sent in multiple packets)
@@ -1659,15 +1684,6 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
 
     if (!h2c->sent_goaway) {
         h2c->h2_cid = id;
-        if (!light_btst(r->rqst_htags, HTTP_HEADER_CONTENT_LENGTH))
-            r->reqbody_length = (s[4] & H2_FLAG_END_STREAM) ? 0 : -1;
-      #if 0
-        else if (r->reqbody_length > 0 && (s[4] & H2_FLAG_END_STREAM)) {
-            /*(handled in connection_handle_read_post_state())*/
-            /* XXX: TODO if (r->conf.log_request_header_on_error) */
-            r->http_status = 400; /* Bad Request */
-        }
-      #endif
         /*(lighttpd.conf config conditions not yet applied to request,
          * but do not increase window size if BUFMIN set in global config)*/
         if (r->reqbody_length /*(see h2_init_con() for session window)*/
@@ -1702,26 +1718,6 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
         }
         if (h2c->rused-1) /*(true if more than one active stream)*/
             h2_apply_priority_update(h2c, r, h2c->rused-1);
-
-        /* RFC 7540 Section 8. HTTP Message Exchanges
-         * 8.1.2.6. Malformed Requests and Responses
-         *   For malformed requests, a server MAY send an HTTP
-         *   response prior to closing or resetting the stream.
-         * However, h2spec expects stream PROTOCOL_ERROR.
-         * (This is unfortunate, since we would rather send
-         *  400 Bad Request which tells client *do not* retry
-         *  the bad request without modification)
-         * https://github.com/summerwind/h2spec/issues/120
-         * https://github.com/summerwind/h2spec/issues/121
-         * https://github.com/summerwind/h2spec/issues/122
-         */
-      #if 0
-        if (__builtin_expect( (400 == r->http_status), 0)) {
-            h2_send_rst_stream(r, con, H2_E_PROTOCOL_ERROR);
-            h2_retire_stream(r, con);
-            /*(h2_retire_stream() invalidates r; must not use r below)*/
-        }
-      #endif
     }
     else if (h2c->h2_cid < id) {
         /* Had to process HPACK to keep HPACK tables sync'd with peer
@@ -2720,9 +2716,11 @@ h2_send_cqdata (request_st * const r, connection * const con, chunkqueue * const
     if ((int32_t)dlen > h2r->x.h2.swin) dlen = (uint32_t)h2r->x.h2.swin;
     const off_t cqlen = chunkqueue_length(cq);
     if ((int32_t)dlen > cqlen) dlen = (uint32_t)cqlen;
+  #ifndef H2SPEC
     /*(note: must temporarily disable next line when running h2spec since
      * some h2spec tests expect 1-byte DATA frame, not a deferred response)*/
     else if (dlen < 2048 && cqlen >= 2048) return 0;
+  #endif
     if (0 == dlen) return 0;
 
     /* XXX: future: should have an interface which processes chunkqueue
@@ -2812,8 +2810,12 @@ h2_send_end_stream_data (request_st * const r, connection * const con)
         /* set timestamp for comparison; not tracking individual stream ids */
         h2con * const h2c = (h2con *)con->hx;
         h2c->half_closed_ts = log_monotonic_secs;
+      #ifndef H2SPEC
         /* indicate to peer that no more DATA should be sent from peer */
+        /*(note: must temporarily disable next line when running h2spec since
+         * some h2spec tests do not expect multiple RST_STREAM frames)*/
         h2_send_rst_stream_id(r->x.h2.id, con, H2_E_NO_ERROR);
+      #endif
     }
     r->x.h2.state = H2_STATE_CLOSED;
 }
@@ -2847,6 +2849,7 @@ h2_send_end_stream (request_st * const r, connection * const con)
 #include "reqpool.h"
 
 
+__attribute_returns_nonnull__
 static request_st *
 h2_init_stream (request_st * const h2r, connection * const con)
 {
@@ -3122,13 +3125,16 @@ h2_upgrade_h2c (request_st * const r, connection * const con)
 
 
 __attribute_cold__
+__attribute_noinline__
 static void
 h2_send_goaway_delayed (connection * const con)
 {
     request_st * const h2r = &con->request;
     if (h2r->keep_alive >= 0) {
-        h2r->keep_alive = -1;
-        h2_send_goaway(con, H2_E_NO_ERROR);
+        if (config_feature_bool(con->srv, "auth.http-goaway-invalid-creds", 1)){
+            h2r->keep_alive = -1;
+            h2_send_goaway(con, H2_E_NO_ERROR);
+        }
         http_response_delay(con);
     }
     else /*(abort connection upon second request to close h2 connection)*/
@@ -3194,21 +3200,20 @@ h2_process_streams (connection * const con,
             /* future: might track read/write interest per request
              * to avoid iterating through all active requests */
             /* specialized connection_state_machine_loop() for h2 streams */
-          #if 0
-            if (r->conf.log_state_handling)
-                connection_log_state(r, "");
-          #endif
             switch (r->state) {
               case CON_STATE_READ_POST:
               case CON_STATE_HANDLE_REQUEST:
                 {
                     const handler_t rc = http_response_loop(r);
                     if (rc >= HANDLER_WAIT_FOR_EVENT) {
-                        if (rc > HANDLER_WAIT_FOR_EVENT)
+                        if (rc > HANDLER_WAIT_FOR_EVENT) {
                             /*HANDLER_ERROR or HANDLER_COMEBACK (not expected)*/
                             request_set_state_error(r, CON_STATE_ERROR);
-                        break;
+                            break;
+                        }
+                        continue; /* HANDLER_WAIT_FOR_EVENT */
                     }
+                    /* HANDLER_GO_ON or HANDLER_FINISHED */
                 }
                 /*__attribute_fallthrough__*/
               /*case CON_STATE_RESPONSE_START:*//*occurred;transient*/
@@ -3217,42 +3222,19 @@ h2_process_streams (connection * const con,
                 __attribute_fallthrough__
               case CON_STATE_WRITE:
                 /* specialized connection_handle_write_state() */
-                if (r->resp_body_finished) {
-                    if (chunkqueue_is_empty(&r->write_queue))
-                        request_set_state(r, CON_STATE_RESPONSE_END);
-                }
-                else if (r->handler_module) {
+
+                if (r->handler_module && !r->resp_body_finished) {
                     const plugin * const p = r->handler_module;
                     if (p->handle_subrequest(r, p->data)
                         > HANDLER_WAIT_FOR_EVENT) {
-                     #if 0
-                      case HANDLER_WAIT_FOR_EVENT:
-                      case HANDLER_FINISHED:
-                      case HANDLER_GO_ON:
-                        break;
                       /*case HANDLER_COMEBACK:*//*error after send resp hdrs*/
                       /*case HANDLER_ERROR:*/
-                      default:
-                     #endif
                         request_set_state_error(r, CON_STATE_ERROR);
                         break;
                     }
                 }
-                break;
-              default:
-                break;
-            }
 
-          #if 0
-            if (r->conf.log_state_handling)
-                connection_log_state(r, " at loop exit");
-          #endif
-
-            if (r->state < CON_STATE_WRITE)
-                continue;
-            /* else CON_STATE_WRITE, CON_STATE_RESPONSE_END, CON_STATE_ERROR */
-            else if (r->state == CON_STATE_WRITE) {
-                if (__builtin_expect((!chunkqueue_is_empty(&r->write_queue)), 1)
+                if (!chunkqueue_is_empty(&r->write_queue)
                     && max_bytes
                     && (r->resp_body_finished
                         || (r->conf.stream_response_body
@@ -3267,8 +3249,10 @@ h2_process_streams (connection * const con,
                     dlen = h2_send_cqdata(r, con, &r->write_queue, dlen);
                     if (dlen) { /*(do not resched (spin) if swin empty window)*/
                         max_bytes -= (off_t)dlen;
-                        if (!chunkqueue_is_empty(&r->write_queue))
+                        if (!chunkqueue_is_empty(&r->write_queue)) {
                             resched |= 1;
+                            continue;
+                        }
                     }
                 }
                 if (!chunkqueue_is_empty(&r->write_queue)
@@ -3276,10 +3260,9 @@ h2_process_streams (connection * const con,
                     continue;
 
                 request_set_state(r, CON_STATE_RESPONSE_END);
-              #if 0
-                if (__builtin_expect( (r->conf.log_state_handling), 0))
-                    connection_log_state(r, "");
-              #endif
+                break;
+              default:
+                break;
             }
 
             {/*(r->state==CON_STATE_RESPONSE_END || r->state==CON_STATE_ERROR)*/
@@ -3308,12 +3291,16 @@ h2_process_streams (connection * const con,
          * note: this is not done to other streams in the loop above
          * (besides the current stream in the loop) due to the specific
          * implementation above, where doing so would mess up the iterator */
+        #if 0
         for (uint32_t i = 0; i < h2c->rused; ++i) {
             request_st * const r = h2c->r[i];
             /*assert(r->x.h2.state == H2_STATE_CLOSED);*/
             h2_retire_stream(r, con);/*r invalidated;removed from h2c->r[]*/
             --i;/* adjust loop i; h2c->rused was modified to retire r */
         }
+        #else
+        do { h2_retire_stream(h2c->r[0], con); } while (h2c->rused);
+        #endif
         /* XXX: ? should we discard con->write_queue
          *        and change h2r->state to CON_STATE_RESPONSE_END ? */
     }

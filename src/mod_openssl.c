@@ -670,7 +670,11 @@ PEM_ASN1_read_bio_secmem(d2i_of_void *d2i, const char *name, BIO *bp, void **x,
     ret = d2i(x, &p, len);
   #ifndef BORINGSSL_API_VERSION /* missing PEMerr() macro */
     if (ret == NULL)
+      #if OPENSSL_VERSION_NUMBER < 0x30000000L
         PEMerr(PEM_F_PEM_ASN1_READ_BIO, ERR_R_ASN1_LIB);
+      #else
+        ERR_raise(ERR_LIB_PEM, ERR_R_ASN1_LIB);
+      #endif
   #endif
     /* boringssl provides OPENSSL_secure_clear_free() in commit
      * 8a1542fc41b43bdcd67cd341c1d332d2e05e2340 (not yet in a release)
@@ -2000,6 +2004,10 @@ network_openssl_ssl_conf_cmd (server *srv, plugin_config_socket *s)
           #endif
             continue;
         }
+      #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        else if (buffer_eq_icase_slen(&ds->key, CONST_STR_LEN("DHParameters")))
+            SSL_CTX_set_dh_auto(s->ssl_ctx, 0);
+      #endif
         ERR_clear_error();
         if (SSL_CONF_cmd(cctx, ds->key.ptr, ds->value.ptr) <= 0) {
             log_error(srv->errh, __FILE__, __LINE__,
@@ -3597,7 +3605,13 @@ https_add_ssl_client_entries (request_st * const r, handler_ctx * const hctx)
         buffer_copy_string_len(vb, CONST_STR_LEN("FAILED:"));
         https_add_ssl_client_verify_err(vb, vr);
         return;
-    } else if (!(xs = SSL_get_peer_certificate(hctx->ssl))) {
+    }
+  #if OPENSSL_VERSION_NUMBER < 0x30000000L
+    else if (!(xs = SSL_get_peer_certificate(hctx->ssl)))
+  #else
+    else if (!(xs = SSL_get0_peer_certificate(hctx->ssl)))
+  #endif
+    {
         buffer_copy_string_len(vb, CONST_STR_LEN("NONE"));
         return;
     } else {
@@ -3659,7 +3673,9 @@ https_add_ssl_client_entries (request_st * const r, handler_ctx * const hctx)
             BIO_free(bio);
         }
     }
+  #if OPENSSL_VERSION_NUMBER < 0x30000000L
     X509_free(xs);
+  #endif
 }
 
 
