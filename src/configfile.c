@@ -554,7 +554,8 @@ static void config_deprecate_module_compress (server *srv) {
 
 static int config_http_parseopts (server *srv, const array *a) {
     unsigned short int opts = srv->srvconf.http_url_normalize;
-    unsigned short int decode_2f = 1;
+    uint8_t decode_2f = 1;
+    uint8_t url_normalize = 1;
     int rc = 1;
     for (size_t i = 0; i < a->used; ++i) {
         const data_string * const ds = (const data_string *)a->data[i];
@@ -616,14 +617,15 @@ static int config_http_parseopts (server *srv, const array *a) {
         else {
             opts &= ~opt;
             if (opt == HTTP_PARSEOPT_URL_NORMALIZE) {
-                opts = 0;
-                break;
+                url_normalize = 0;
             }
             if (opt == HTTP_PARSEOPT_URL_NORMALIZE_PATH_2F_DECODE) {
                 decode_2f = 0;
             }
         }
     }
+    if (!url_normalize)
+        opts = 0;
     if (opts != 0) {
         opts |= HTTP_PARSEOPT_URL_NORMALIZE;
         if ((opts & (HTTP_PARSEOPT_URL_NORMALIZE_PATH_2F_DECODE
@@ -992,6 +994,7 @@ static void config_mimetypes_default(array * const a) {
        ,".webp",  "image/webp"
 
        ,".avi",   "video/x-msvideo"
+       ,".mkv",   "video/x-matroska"
        ,".m4v",   "video/mp4"
        ,".mp4",   "video/mp4"
        ,".mpeg",  "video/mpeg"
@@ -1366,6 +1369,9 @@ int config_finalize(server *srv, const buffer *default_server_tag) {
       srv->srvconf.high_precision_timestamps =
         config_feature_bool(srv, "server.metrics-high-precision",
                             srv->srvconf.high_precision_timestamps);
+
+    /* disable h2proto if mod_h2 was not found during plugin load */
+    p->defaults.h2proto = srv->srvconf.h2proto;
 
     /* configure default server_tag if not set
      * (if configured to blank, unset server_tag)*/

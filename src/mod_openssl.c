@@ -82,6 +82,7 @@
 #include <openssl/ocsp.h>
 #endif
 #ifdef BORINGSSL_API_VERSION
+#include <openssl/hmac.h>
 /* BoringSSL purports to have some OCSP support */
 #undef OPENSSL_NO_OCSP
 #endif
@@ -2191,7 +2192,8 @@ mod_openssl_ssl_conf_dhparameters(server *srv, plugin_config_socket *s, const bu
 
 
 #if defined(BORINGSSL_API_VERSION) \
- || defined(LIBRESSL_VERSION_NUMBER)
+ || defined(LIBRESSL_VERSION_NUMBER) \
+ || OPENSSL_VERSION_NUMBER < 0x10100000L
 static int
 mod_openssl_ssl_conf_curves(server *srv, plugin_config_socket *s, const buffer *ssl_ec_curve)
 {
@@ -2254,6 +2256,7 @@ mod_openssl_ssl_conf_curves(server *srv, plugin_config_socket *s, const buffer *
     return 1;
 }
 #endif /* BORINGSSL_API_VERSION || LIBRESSL_VERSION_NUMBER */
+       /* || OPENSSL_VERSION_NUMBER < 0x10100000L */
 
 
 static int
@@ -2364,6 +2367,11 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
 
         if (!mod_openssl_ssl_conf_dhparameters(srv, s, NULL))
             return -1;
+
+      #if OPENSSL_VERSION_NUMBER < 0x10100000L
+        if (!mod_openssl_ssl_conf_curves(srv, s, NULL))
+            return -1;
+      #endif
 
       #ifdef TLSEXT_TYPE_session_ticket
        #if OPENSSL_VERSION_NUMBER < 0x30000000L
@@ -2996,11 +3004,12 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
             mod_openssl_merge_config(&p->defaults, cpv);
     }
 
-  #if OPENSSL_VERSION_NUMBER < 0x10101000L \
+  #if OPENSSL_VERSION_NUMBER < 0x30000000L \
+   && !defined(BORINGSSL_API_VERSION) \
    && !defined(LIBRESSL_VERSION_NUMBER)
     log_error(srv->errh, __FILE__, __LINE__, "SSL:"
       "openssl library version is outdated and has reached end-of-life.  "
-      "As of 1 Jan 2020, only openssl 1.1.1 and later continue to receive "
+      "As of 11 Sep 2023, only openssl 3.0.0 and later continue to receive "
       "security patches from openssl.org");
   #endif
 

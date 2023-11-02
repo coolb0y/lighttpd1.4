@@ -435,6 +435,22 @@ h2_send_refused_stream (uint32_t h2id, connection * const con)
 {
     h2con * const h2c = (h2con *)con->hx;
 
+    /* avoid sending REFUSED_STREAM if an existing stream is ready to be
+     * cleaned up, better handling edge case where stream concurrency limit
+     * has been reached and client sends RST_STREAM followed by HEADERS to
+     * cancel an existing stream and create a new, different stream.
+     * Note: this handles HTTP/2 rapid reset attack (CVE-2023-44487)
+     * slightly better than prior behavior by avoiding the minor overhead
+     * of responding with RST_STREAM REFUSED_STREAM */
+    for (uint32_t i = 0, rused = h2c->rused; i < rused; ++i) {
+        const request_st * const r = h2c->r[i];
+        if (r->state > CON_STATE_WRITE)
+            /* (CON_STATE_RESPONSE_END or CON_STATE_ERROR)
+             * request will be cleaned up shortly, releasing a slot;
+             * defer processing frame rather than sending REFUSED_STREAM */
+            return -1;
+    }
+
     if (h2c->sent_settings) { /*(see h2_recv_settings() comments)*/
         /* client connected and immediately sent flurry of request streams
          * (h2c->sent_settings is non-zero if sent SETTINGS frame to
@@ -443,13 +459,31 @@ h2_send_refused_stream (uint32_t h2id, connection * const con)
          * server Connection Preface, so a well-behaved client will
          * adjust after it sends its initial requests.
          *   (e.g. h2load -n 100 -m 100 sends 100 requests upon connect)
-         *
+         */
+
+        /* Send GOAWAY if too many requests (> 100) sent prior to SETTINGS ackn
+         *   (and if we reach here checking to refuse excess stream).
+         * (lighttpd currently sends SETTINGS once, following server preface) */
+        if (h2id > 200) {
+            log_error(NULL, __FILE__, __LINE__,
+              "h2: %s too many refused requests before SETTINGS ackn",
+              con->request.dst_addr_buf->ptr);
+            h2_send_goaway_e(con, H2_E_ENHANCE_YOUR_CALM);
+            return 0;
+        }
+
+        /*
          * Check if active streams have pending request body.  If all active
          * streams have pending request body, then must refuse new stream as
          * progress might be blocked if active streams all wait for DATA. */
         for (uint32_t i = 0, rused = h2c->rused; i < rused; ++i) {
             const request_st * const r = h2c->r[i];
             if (r->reqbody_length == r->reqbody_queue.bytes_in) {
+                /* check that stream response will not be blocked waiting
+                 * for stream WINDOW_UPDATE or connection WINDOW_UPDATE */
+                request_st * const h2r = &con->request;
+                if (r->x.h2.swin <= 0 || h2r->x.h2.swin <= 0) continue;
+
                 /* no pending request body; at least this request may proceed,
                  * though others waiting for request body may block until new
                  * request streams become active if new request streams precede
@@ -472,6 +506,30 @@ h2_send_refused_stream (uint32_t h2id, connection * const con)
     /* too many active streams; refuse new stream */
     h2c->h2_cid = h2id;
     h2_send_rst_stream_id(h2id, con, H2_E_REFUSED_STREAM);
+
+    /* mitigate request floods pipelining streams in excess of concurrency limit
+     *
+     * excess streams opened after SETTINGS_MAX_CONCURRENT_STREAMS 8 sent may
+     * indicate an attack, or may indicate an impatient and ill-behaved client
+     * (SETTINGS_MAX_CONCURRENT_STREAMS >= 100 recommended by RFC 9113)
+     * If client sends more than 100 requests before sending SETTINGS ackn,
+     * then lighttpd treats that as excessive (above).  It could be accidental,
+     * but could be malicious since an attacker might intentionally omit sending
+     * SETTINGS ackn.  Note: SETTINGS_MAX_CONCURRENT_STREAMS is not currently
+     * sent by lighttpd after SETTINGS following HTTP/2 server preface, so this
+     * stream concurrency limit does not change after connection initiation.
+     * Here, either SETTINGS ackn has been received, and still too many requests
+     * (more than concurrenty limit of 8) *or* fall through from above if active
+     *  requests might block/timeout waiting for later frames).  Well-behaved
+     * clients should not fall afoul of server SETTINGS_MAX_CONCURRENT_STREAMS*/
+    if (++h2c->n_refused_stream > 16) {
+        log_error(NULL, __FILE__, __LINE__,
+          "h2: %s too many refused requests",
+          con->request.dst_addr_buf->ptr);
+        h2_send_goaway_e(con, H2_E_NO_ERROR);
+        /*(return 0 if sending H2_E_ENHANCE_YOUR_CALM instead)*/
+    }
+
     return 1;
 }
 
@@ -537,6 +595,27 @@ h2_recv_rst_stream (connection * const con, const uint8_t * const s, const uint3
         /* XXX: ? add debug trace including error code from RST_STREAM ? */
         r->state = CON_STATE_ERROR;
         r->x.h2.state = H2_STATE_CLOSED;
+
+        /* attempt to detect HTTP/2 rapid reset attack (CVE-2023-44487)
+         * Send GOAWAY if 17 or more requests in recent batch of up to 32
+         * requests have been cancelled by client sending RST_STREAM.
+         * Note: this can legitimately occur, but is less likely for RST_STREAM
+         * in < 2 secs in which request was sent, repeated 16 more times within
+         * the next 32 requests, w/ SETTINGS_MAX_CONCURRENT_STREAMS only 8.
+         * Still, send GOAWAY NO_ERROR instead of sending ENHANCE_YOUR_CALM. */
+        if (!h2c->sent_goaway && r->start_hp.tv_sec+2 > log_epoch_secs) {
+            if ((++h2c->n_recv_rst_stream & 0xf) == 0)
+                h2c->n_recv_rst_stream |= 0xf;
+            uint8_t n_recv_rst_stream =
+              (h2c->n_recv_rst_stream >> 4) + (h2c->n_recv_rst_stream & 0xf);
+            if (n_recv_rst_stream > 16) {
+                log_error(NULL, __FILE__, __LINE__,
+                  "h2: %s sent too many RST_STREAM too quickly",
+                  con->request.dst_addr_buf->ptr);
+                h2_send_goaway_e(con, H2_E_NO_ERROR);
+            }
+        }
+
         return;
     }
     /* unknown/inactive stream id
@@ -1392,6 +1471,11 @@ h2_recv_trailers_r (connection * const con, h2con * const h2c, const uint32_t id
      * be optional, like in HTTP/1.1 */
     request_st * const r = h2_get_stream_req(h2c, id);
     if (NULL == r) {
+        /* Note: sending GOAWAY here might be too strict.  With the introduction
+         * of h2_discard_headers(), the GOAWAY can now safely be commented out
+         * if this causes any issue with legitimate use in the field due to
+         * lighttpd responding to a stream, closing and forgetting about the
+         * stream, and then receiving trailers from the client for the stream.*/
         h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
         return NULL;
     }
@@ -1413,15 +1497,42 @@ h2_recv_trailers_r (connection * const con, h2con * const h2c, const uint32_t id
 }
 
 
+__attribute_cold__
+static void
+h2_discard_headers_frame (struct lshpack_dec * const restrict decoder, const unsigned char **psrc, const unsigned char * const restrict endp, const request_st * const restrict r)
+{
+    /* HPACK decode and discard; stripped down from h2_parse_headers_frame().
+     * If HEADERS frame is received, HEADERS frame must be HPACK-decoded to
+     * maintain HPACK decoder state consistency for the connection, unless
+     * GOAWAY has been sent and no new streams will be opened.  Even then,
+     * if GOAWAY was sent with H2_E_NO_ERROR, there is still chance that
+     * trailers sent later on active streams will fail to be decoded unless
+     * all HEADERS frames are HPACK-decoded in the order received. */
+
+    /*(h2_init_con() resized h2r->tmp_buf to 64k; shared with r->tmp_buf)*/
+    buffer * const tb = r->tmp_buf;
+    char * const tbptr = tb->ptr;
+    const lsxpack_strlen_t tbsz = (tb->size <= LSXPACK_MAX_STRLEN)
+      ? tb->size
+      : LSXPACK_MAX_STRLEN;
+
+    lsxpack_header_t lsx;
+    while (*psrc < endp) {
+        memset(&lsx, 0, sizeof(lsxpack_header_t));
+        lsx.buf = tbptr;
+        lsx.val_len = tbsz;
+        if (lshpack_dec_decode(decoder, psrc, endp, &lsx) != LSHPACK_OK)
+            break; /* HPACK decode failed; should probably send GOAWAY? */
+    }
+}
+
+
 static void h2_retire_stream (request_st *r, connection * const con);
 
 
 static void
-h2_parse_headers_frame (request_st * const restrict r, const unsigned char *psrc, const uint32_t plen, const int trailers)
+h2_parse_headers_frame (struct lshpack_dec * const restrict decoder, const unsigned char **psrc, const unsigned char * const endp, request_st * const restrict r, const int trailers)
 {
-    h2con * const h2c = (h2con *)r->con->hx;
-    struct lshpack_dec * const restrict decoder = &h2c->decoder;
-    const unsigned char * const endp = psrc + plen;
     http_header_parse_ctx hpctx;
     hpctx.hlen     = 0;
     hpctx.pseudo   = 1; /*(XXX: should be !trailers if handling trailers)*/
@@ -1442,11 +1553,11 @@ h2_parse_headers_frame (request_st * const restrict r, const unsigned char *psrc
       : LSXPACK_MAX_STRLEN;
 
     lsxpack_header_t lsx;
-    while (psrc < endp) {
+    while (*psrc < endp) {
         memset(&lsx, 0, sizeof(lsxpack_header_t));
         lsx.buf = tbptr;
         lsx.val_len = tbsz;
-        rc = lshpack_dec_decode(decoder, &psrc, endp, &lsx);
+        rc = lshpack_dec_decode(decoder, psrc, endp, &lsx);
         if (0 == lsx.name_len)
             rc = LSHPACK_ERR_BAD_DATA;
         if (__builtin_expect( (rc == LSHPACK_OK), 1)) {
@@ -1466,6 +1577,9 @@ h2_parse_headers_frame (request_st * const restrict r, const unsigned char *psrc
             if (__builtin_expect( (0 != http_status), 0)) {
                 if (r->http_status == 0) /*might be set if processing trailers*/
                     r->http_status = http_status;
+                /* Note: hpctx.hlen is not adjusted for rest of headers, nor
+                 * debug printing of headers if hpctx.log_request_header */
+                h2_discard_headers_frame(decoder, psrc, endp, r);
                 break;
             }
         }
@@ -1495,19 +1609,22 @@ h2_parse_headers_frame (request_st * const restrict r, const unsigned char *psrc
             if (rc != LSHPACK_ERR_BAD_DATA) {
                 /* LSHPACK_ERR_TOO_LARGE, LSHPACK_ERR_MORE_BUF */
                 err = H2_E_PROTOCOL_ERROR;
+              #if 0
+                /* redundant: h2_send_goaway_e() sends RST_STREAM with
+                 * H2_E_PROTOCOL_ERROR if GOAWAY not already sent.
+                 * (If GOAWAY were sent with higher id, we would want
+                 *  to send RST_STREAM here, but that is not the case) */
                 h2_send_rst_stream(r, r->con, err);
+              #endif
             }
-            if (!h2c->sent_goaway && !hpctx.trailers)
-                h2c->h2_cid = r->x.h2.id;
-            h2_send_goaway_e(r->con, err);
             if (!hpctx.trailers) {
-                h2_retire_stream(r, r->con);
+                h2con * const h2c = (h2con *)r->con->hx;
+                if (!h2c->sent_goaway)
+                    h2c->h2_cid = r->x.h2.id;
+                h2_send_goaway_e(r->con, err);
                 return;
             }
-            else {
-                r->state = CON_STATE_ERROR;
-                r->x.h2.state = H2_STATE_CLOSED;
-            }
+            h2_send_goaway_e(r->con, err);
             break;
         }
     }
@@ -1550,6 +1667,41 @@ h2_parse_headers_frame (request_st * const restrict r, const unsigned char *psrc
 }
 
 
+__attribute_cold__
+static int
+h2_discard_headers (struct lshpack_dec * const restrict decoder, const unsigned char **psrc, const unsigned char * const restrict endp, const request_st * const restrict r, h2con * const h2c)
+{
+    /* If GOAWAY was sent with an error, return quickly without decoding;
+     * choose *to not keep* HPACK decoder state in sync, since
+     * h2_send_rst_stream_state() set r->state = CON_STATE_ERROR and
+     * r->x.h2.state = H2_STATE_CLOSED for previously active streams. */
+    if (h2c->sent_goaway > 0) return 0;
+
+    /* Send error if too many discarded HEADERS frames.
+     * (similar to h2_send_refused_stream())
+     * Note: this could legitimately be triggered by a client sending trailers
+     * after lighttpd has responded to and closed a stream, so no longer tracked
+     * by lighttpd, but that is not expected to be a common scenario.  (Also, if
+     * this were permitted without limit, it could be abused to bypass limit.)*/
+    if (++h2c->n_discarded_headers > 32) {
+        connection * const con = r->con;
+        log_error(NULL, __FILE__, __LINE__,
+          "h2: %s too many discarded requests",
+          con->request.dst_addr_buf->ptr);
+        h2_send_goaway_e(con, H2_E_ENHANCE_YOUR_CALM);
+    }
+
+    h2_discard_headers_frame(decoder, psrc, endp, r);
+
+    /* return 1 to continue processing HTTP/2 frames
+     * Note: if returning 0 to defer processing additional frames and
+     * yield to other connections, must also joblist_append(con) unless
+     * all h2c->r slots are full and next frame is HEADERS (which could
+     * be passed in as a flag depending on the calling location) */
+    return 1;
+}
+
+
 __attribute_noinline__
 static int
 h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
@@ -1561,7 +1713,6 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
      * might be made to the code in the future. */
     __coverity_tainted_data_sink__(s);
   #endif
-    request_st *r = NULL;
     h2con * const h2c = (h2con *)con->hx;
     const uint32_t id = h2_u31(s+5);
   #if 0 /*(included in (!(id & 1)) below)*/
@@ -1575,20 +1726,91 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
         return 0;
     }
 
-    request_st * const h2r = &con->request;
-    int trailers = 0;
+    const unsigned char *psrc = s + 9;
+    uint32_t alen = flen;
+    if (s[4] & H2_FLAG_PADDED) {
+        ++psrc;
+        const uint32_t pad = s[9];
+        if (alen < 1 + pad) {
+            /* Padding that exceeds the size remaining for the header block
+             * fragment MUST be treated as a PROTOCOL_ERROR. */
+            h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
+            return 0;
+        }
+        alen -= (1 + pad); /*(alen is adjusted for PRIORITY below)*/
+    }
+    if (s[4] & H2_FLAG_PRIORITY) {
+        if (alen < 5) {
+            h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
+            return 0;
+        }
+        if (((/*prio = */h2_u32(psrc)) == id) & (id > h2c->h2_cid)) {
+            /*(ignore dep if HEADERS frame is trailers (id <= h2c->h2_cid)*/
+            /* https://www.rfc-editor.org/rfc/rfc7540#section-5.3.1
+             * A stream cannot depend on itself.  An endpoint MUST treat this
+             * as a stream error (Section 5.4.2) of type PROTOCOL_ERROR.*/
+            h2_send_rst_stream_id(id, con, H2_E_PROTOCOL_ERROR);
+            /* PRIORITY is deprecated in RFC9113.  As this mistake is now more
+             * likely an attack, follow with goaway error since HEADERS frame
+             * is not HPACK decoded here to maintain HPACK decoder state. */
+            h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
+            return 0;
+        }
+      #if 0
+        uint32_t exclusive_dependency = (psrc[0] & 0x80) ? 1 : 0;
+        /*(ignore dependency prid and exclusive_dependency,
+         * and attempt to scale PRIORITY weight (weight+1 default is 16)
+         * to PRIORITY_UPDATE (default urgency 3) (see h2_init_stream()))*/
+        uint8_t weight = psrc[4] >> 2;
+        r->x.h2.prio = ((weight < 8 ? weight : 7) << 1) | !0;
+      #endif
+        psrc += 5;
+        alen -= 5;
+    }
 
-    if (id > h2c->h2_cid) {
+    if (id <= h2c->h2_cid) { /* (trailers; cold code path) */
+        request_st * const r = h2_recv_trailers_r(con, h2c, id, s[4]);
+        if (NULL == r)
+            return h2_discard_headers(&h2c->decoder, &psrc, psrc+alen,
+                                      &con->request, h2c);
+        h2_parse_headers_frame(&h2c->decoder,&psrc,psrc+alen,r,1);/*(trailers)*/
+        return 1;
+    }
+
+    /* Note: MUST process HPACK decode even if already sent GOAWAY.
+     * This is necessary since there may be active streams not in
+     * H2_STATE_HALF_CLOSED_REMOTE, e.g. H2_STATE_OPEN, still possibly
+     * receiving DATA and, more relevantly, still might receive HEADERS
+     * frame with trailers, for which the decoder state may be required. */
+
+    if (h2c->sent_goaway)
+        return h2_discard_headers(&h2c->decoder, &psrc, psrc+alen,
+                                  &con->request, h2c);
+
+  #if 0 /*(handled in h2_parse_frames() as a connection error)*/
+    if (s[3] == H2_FTYPE_PUSH_PROMISE) {
+        /* discard the request if PUSH_PROMISE, since not expected, as this code
+         * is running as a server, not as a client. */
+        /* note: h2_parse_headers_frame() sets h2c->h2_cid on HPACK decode error
+         * and would need to be changed for code to be shared by PUSH_PROMISE */
+        /* rant: PUSH_PROMISE could have been a flag on HEADERS frame
+         *       instead of an independent frame type */
+        h2c->h2_sid = id;
+        return h2_discard_headers(&h2c->decoder, &psrc, psrc+alen,
+                                  &con->request, h2c);
+    }
+  #endif
+
+    /* new stream */
+
         if (h2c->rused == sizeof(h2c->r)/sizeof(*h2c->r))
-            return h2_send_refused_stream(id, con);
-        /* Note: MUST process HPACK decode even if already sent GOAWAY.
-         * This is necessary since there may be active streams not in
-         * H2_STATE_HALF_CLOSED_REMOTE, e.g. H2_STATE_OPEN, still possibly
-         * receiving DATA and, more relevantly, still might receive HEADERS
-         * frame with trailers, for which the decoder state is required.
-         * XXX: future might try to reduce other processing done if sent
-         *      GOAWAY, e.g. might avoid allocating (request_st *r) */
-        r = h2_init_stream(h2r, con);
+            return h2_send_refused_stream(id, con) == -1
+              ? -1
+              : h2_discard_headers(&h2c->decoder, &psrc, psrc+alen,
+                                   &con->request, h2c);
+
+        request_st * const h2r = &con->request;
+        request_st * const r = h2_init_stream(h2r, con);
         r->x.h2.id = id;
         if (s[4] & H2_FLAG_END_STREAM) {
             r->x.h2.state = H2_STATE_HALF_CLOSED_REMOTE;
@@ -1614,76 +1836,17 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
         r->start_hp.tv_sec = log_epoch_secs;
         if (r->conf.high_precision_timestamps)
             log_clock_gettime_realtime(&r->start_hp);
-    }
-    else {
-        r = h2_recv_trailers_r(con, h2c, id, s[4]); /* (cold code path) */
-        if (NULL == r)
-            return (h2c->sent_goaway > 0) ? 0 : 1;
-        trailers = 1;
-    }
 
-    const unsigned char *psrc = s + 9;
-    uint32_t alen = flen;
-    if (s[4] & H2_FLAG_PADDED) {
-        ++psrc;
-        const uint32_t pad = s[9];
-        if (alen < 1 + pad) {
-            /* Padding that exceeds the size remaining for the header block
-             * fragment MUST be treated as a PROTOCOL_ERROR. */
-            h2_send_goaway_e(con, H2_E_PROTOCOL_ERROR);
-            if (!trailers)
-                h2_retire_stream(r, con);
-            else {
-                r->state = CON_STATE_ERROR;
-                r->x.h2.state = H2_STATE_CLOSED;
-            }
-            return 0;
-        }
-        alen -= (1 + pad); /*(alen is adjusted for PRIORITY below)*/
-    }
-    if (s[4] & H2_FLAG_PRIORITY) {
-        /* XXX: TODO: handle PRIORITY (prio fields start at *psrc) */
-        if (alen < 5 || (/*prio = */h2_u32(psrc)) == id) {
-            h2_send_rst_stream(r, con, H2_E_PROTOCOL_ERROR);
-            if (!trailers)
-                h2_retire_stream(r, con);
-            return 1;
-        }
-      #if 0
-        uint32_t exclusive_dependency = (psrc[0] & 0x80) ? 1 : 0;
-        /*(ignore dependency prid and exclusive_dependency,
-         * and attempt to scale PRIORITY weight (weight+1 default is 16)
-         * to PRIORITY_UPDATE (default urgency 3) (see h2_init_stream()))*/
-        uint8_t weight = psrc[4] >> 2;
-        r->x.h2.prio = ((weight < 8 ? weight : 7) << 1) | !0;
-      #endif
-        psrc += 5;
-        alen -= 5;
-    }
-
-    h2_parse_headers_frame(r, psrc, alen, trailers);
-
-    if (__builtin_expect( (trailers), 0))
-        return 1;
-
-  #if 0 /*(handled in h2_parse_frames() as a connection error)*/
-    /* not handled here:
-     * r is invalid if h2_parse_headers_frame() HPACK decode error */
-    if (s[3] == H2_FTYPE_PUSH_PROMISE) {
-        /* Had to process HPACK to keep HPACK tables sync'd with peer but now
-         * discard the request if PUSH_PROMISE, since not expected, as this code
-         * is running as a server, not as a client.
-         * XXX: future might try to reduce other processing done if
-         * discarding, e.g. might avoid allocating (request_st *r) */
-        /* rant: PUSH_PROMISE could have been a flag on HEADERS frame
-         *       instead of an independent frame type */
-        r->http_status = 0;
-        h2_retire_stream(r, con);
-    }
-  #endif
+    h2_parse_headers_frame(&h2c->decoder, &psrc, psrc+alen, r, 0); /*(headers)*/
 
     if (!h2c->sent_goaway) {
         h2c->h2_cid = id;
+
+        /* counter to detect HTTP/2 rapid reset attack (CVE-2023-44487)
+         * HTTP/2 client ids are odds, so use mask 0x1f
+         * in order to reset lower counter every 16 requests */
+        if ((id & 0x1f) == 0x1) h2c->n_recv_rst_stream <<= 4;
+
         /*(lighttpd.conf config conditions not yet applied to request,
          * but do not increase window size if BUFMIN set in global config)*/
         if (r->reqbody_length /*(see h2_init_con() for session window)*/
@@ -1719,11 +1882,9 @@ h2_recv_headers (connection * const con, uint8_t * const s, uint32_t flen)
         if (h2c->rused-1) /*(true if more than one active stream)*/
             h2_apply_priority_update(h2c, r, h2c->rused-1);
     }
-    else if (h2c->h2_cid < id) {
+    else {
         /* Had to process HPACK to keep HPACK tables sync'd with peer
-         * but now discard the request if id is after id sent in GOAWAY.
-         * XXX: future might try to reduce other processing done if
-         * discarding, e.g. might avoid allocating (request_st *r) */
+         * but now discard the request */
         r->http_status = 0;
         h2_retire_stream(r, con);
     }
@@ -1745,6 +1906,11 @@ h2_parse_frames (connection * const con)
      *       should accept the larger frame size until SETTINGS is ACK'd) */
     const uint32_t fsize = h2c->s_max_frame_size;
     for (off_t cqlen; (cqlen = chunkqueue_length(cq)) >= 9; ) {
+
+        /* defer parsing additional frames if large output queue pending write*/
+        if (__builtin_expect( (chunkqueue_length(con->write_queue) > 65536), 0))
+            return 0;
+
         chunk *c = cq->first;
         /*assert(c->type == MEM_CHUNK);*/
         /* copy data if frame header crosses chunk boundary
@@ -3308,8 +3474,19 @@ h2_process_streams (connection * const con,
     request_st * const h2r = &con->request;
     if (h2r->state == CON_STATE_WRITE) {
         /* write HTTP/2 frames to socket */
-        if (!chunkqueue_is_empty(con->write_queue))
+        if (!chunkqueue_is_empty(con->write_queue)) {
             connection_handle_write(h2r, con);
+            /* check if might need to resched to process more frames
+             * (could be more precise duplicating parts of h2_want_read(),
+             *  though prefer to check here when write_queue has been emptied)
+             * need to resched if still CON_STATE_WRITE, write_queue empty,
+             * full frame pending, and frame is not HEADERS or h2c->r not full,
+             * which might happen if parsing frames was deferred if write_queue
+             * grew too large generating HTTP/2 replies to various frame types*/
+            if (chunkqueue_is_empty(con->write_queue)
+                && !chunkqueue_is_empty(con->read_queue))
+                resched |= 2;
+        }
 
         if (chunkqueue_is_empty(con->write_queue)
             && 0 == h2c->rused && h2c->sent_goaway)
