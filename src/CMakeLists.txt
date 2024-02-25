@@ -50,10 +50,6 @@ option(WITH_MAXMINDDB "with MaxMind GeoIP2-support mod_maxminddb [default: off]"
 option(WITH_SASL "with SASL-support for mod_authn_sasl [default: off]")
 option(WITH_XXHASH "with system-provided xxhash [default: off]")
 
-if(NOT LEMON_PATH)
-	set(LEMON_PATH ${CMAKE_CURRENT_BINARY_DIR}/lemon)
-endif()
-
 if(WITH_JAVA_NATIVE_INTERFACE)
 	set(BUILD_LIBRARY 1)
 endif()
