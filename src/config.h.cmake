@@ -132,10 +132,6 @@
 /* sqlite3 */
 #cmakedefine  HAVE_SQLITE3_H
 
-/* UUID */
-#cmakedefine  HAVE_UUID_UUID_H
-#cmakedefine  HAVE_LIBUUID
-
 /* ZLIB */
 #cmakedefine  HAVE_ZLIB_H
 #cmakedefine  HAVE_LIBZ
@@ -185,13 +181,13 @@
 #cmakedefine  HAVE_PORT_CREATE
 #cmakedefine  HAVE_PREAD
 #cmakedefine  HAVE_PREADV
+#cmakedefine  HAVE_PREADV2
 #cmakedefine  HAVE_PWRITE
 #cmakedefine  HAVE_PWRITEV
 #cmakedefine  HAVE_SELECT
 #cmakedefine  HAVE_SENDFILE
 #cmakedefine  HAVE_SENDFILE_BROKEN
 #cmakedefine  HAVE_SEND_FILE
-#cmakedefine  HAVE_SENDFILE64
 #cmakedefine  HAVE_SENDFILEV
 #cmakedefine  HAVE_SETPFLAGS
 #cmakedefine  HAVE_SIGACTION

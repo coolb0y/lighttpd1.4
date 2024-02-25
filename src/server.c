@@ -470,15 +470,21 @@ server_epoch_secs (server * const srv, unix_time64_t mono_ts_delta)
     const unix_time64_t new_ts_adj = new_ts - mono_ts_delta;
     /* attempt to detect large clock jump */
     if (new_ts_adj < cur_ts || new_ts_adj - cur_ts > 300) { /*(5 mins)*/
-        log_error(srv->errh, __FILE__, __LINE__,
+        log_warn(srv->errh, __FILE__, __LINE__,
           "warning: clock jumped %lld secs",
           (long long)((int64_t)new_ts_adj - (int64_t)cur_ts));
+
+        /* graceful restart not available if chroot'ed */
+        if (srv->srvconf.changeroot)
+            return new_ts;
+
         int delta =                             /*(30 mins default)*/
           config_feature_int(srv, "server.clock-jump-restart", 1800);
         if (delta && (new_ts_adj > cur_ts
                       ? new_ts_adj-cur_ts
                       : cur_ts-new_ts_adj) > delta) {
             log_error(srv->errh, __FILE__, __LINE__,
+              "clock jumped; "
               "attempting graceful restart in < ~5 seconds, else hard restart");
             srv->graceful_expire_ts = log_monotonic_secs + 5;
             raise(SIGUSR1);
@@ -1128,7 +1134,7 @@ static int server_graceful_state_bg (server *srv) {
          * future: fdevent kqueue and stat_cache kqueue would need to be closed,
          *         re-opened, and active fds re-registered.  Not current done.
          *         Need to create some routines like fdevent_reinit_after_fork*/
-        log_error(srv->errh, __FILE__, __LINE__,
+        log_warn(srv->errh, __FILE__, __LINE__,
           "server.graceful-restart-bg ignored on OpenBSD and NetBSD "
           "due to limitation in kqueue inheritance and lacking rfork");
         return 0;
@@ -1180,7 +1186,7 @@ static int server_graceful_state_bg (server *srv) {
 
     /* (original process is backgrounded -- even if no active connections --
      *  to allow graceful shutdown tasks to be run by server and by modules) */
-    log_error(srv->errh, __FILE__, __LINE__,
+    log_notice(srv->errh, __FILE__, __LINE__,
       "[note] pid %lld continuing to handle %u connection(s) in progress",
       (long long)getpid(), srv->srvconf.max_conns - srv->lim_conns);
 
@@ -1229,7 +1235,7 @@ static void server_graceful_state (server *srv) {
         return;
     }
 
-    log_error(srv->errh,__FILE__,__LINE__,"[note] graceful shutdown started");
+    log_notice(srv->errh,__FILE__,__LINE__,"[note] graceful shutdown started");
 
     /* no graceful restart if chroot()ed, if oneshot mode, or if idle timeout */
     if (srv->srvconf.changeroot || oneshot_fd || 2 == graceful_shutdown)
@@ -1253,7 +1259,7 @@ __attribute_noinline__
 static void server_sockets_enable (server *srv) {
     server_sockets_set_event(srv, FDEVENT_IN);
     srv->sockets_disabled = 0;
-    log_error(srv->errh, __FILE__, __LINE__, "[note] sockets enabled again");
+    log_notice(srv->errh, __FILE__, __LINE__, "[note] sockets enabled again");
 }
 
 __attribute_cold__
@@ -1261,7 +1267,7 @@ __attribute_noinline__
 static void server_sockets_disable (server *srv) {
     server_sockets_set_event(srv, 0);
     srv->sockets_disabled = 1;
-    log_error(srv->errh, __FILE__, __LINE__,
+    log_notice(srv->errh, __FILE__, __LINE__,
       (0 == srv->lim_conns)
         ? "[note] sockets disabled, connection limit reached"
         : "[note] sockets disabled, out-of-fds");
@@ -1547,7 +1553,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		srv->srvconf.pid_file = NULL;
 		if (srv->srvconf.max_worker) {
 			srv->srvconf.max_worker = 0;
-			log_error(srv->errh, __FILE__, __LINE__,
+			log_warn(srv->errh, __FILE__, __LINE__,
 			  "server one-shot command line option disables server.max-worker config file option.");
 		}
 
@@ -1689,7 +1695,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		plugin *p = ((plugin **)srv->plugins.ptr)[i];
 		if (0 == strcmp(p->name, "indexfile")) {
 			if (pname)
-				log_error(srv->errh, __FILE__, __LINE__,
+				log_warn(srv->errh, __FILE__, __LINE__,
 				  "Warning: mod_indexfile should be listed in server.modules prior to mod_%s", pname);
 			break;
 		}
@@ -1907,7 +1913,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 		   #endif
 		    /*(might perform similar checks on srv->srvconf.modules_dir)*/
 		    ) {
-			log_error(srv->errh, __FILE__, __LINE__,
+			log_warn(srv->errh, __FILE__, __LINE__,
 			  "(warning) daemonizing without absolute path command line args"
 			  " (graceful restart may fail)");
 		}
@@ -1949,7 +1955,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			return -1;
 		}
 		if (!oneshot_fd)
-			log_error(srv->errh, __FILE__, __LINE__, "server started (" PACKAGE_DESC ")");
+			log_notice(srv->errh, __FILE__, __LINE__, "server started (" PACKAGE_DESC ")");
 	}
 
 	if (HANDLER_GO_ON != plugins_call_set_defaults(srv)) {
@@ -1983,7 +1989,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 
 	if (idle_limit && srv->srvconf.max_worker) {
 		srv->srvconf.max_worker = 0;
-		log_error(srv->errh, __FILE__, __LINE__,
+		log_warn(srv->errh, __FILE__, __LINE__,
 		  "server idle time limit command line option disables server.max-worker config file option.");
 	}
 
@@ -2010,7 +2016,7 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 	/* set max-conns */
 	if (srv->srvconf.max_conns > srv->max_fds/2) {
 		/* we can't have more connections than max-fds/2 */
-		log_error(srv->errh, __FILE__, __LINE__,
+		log_warn(srv->errh, __FILE__, __LINE__,
 		  "can't have more connections than fds/2: %hu %d",
 		  srv->srvconf.max_conns, srv->max_fds);
 		srv->lim_conns = srv->srvconf.max_conns = srv->max_fds/2;
@@ -2106,12 +2112,12 @@ static void server_handle_sighup (server * const srv) {
 			plugins_call_handle_sighup(srv);
 			fdlog_files_cycle(srv->errh); /* reopen log files, not pipes */
 #ifdef HAVE_SIGACTION
-				log_error(srv->errh, __FILE__, __LINE__,
+				log_info(srv->errh, __FILE__, __LINE__,
 				  "logfiles cycled UID = %d PID = %d",
 				  (int)last_sighup_info.si_uid,
 				  (int)last_sighup_info.si_pid);
 #else
-				log_error(srv->errh, __FILE__, __LINE__,
+				log_info(srv->errh, __FILE__, __LINE__,
 				  "logfiles cycled");
 #endif
 }
@@ -2126,7 +2132,7 @@ static void server_handle_sigalrm (server * const srv, unix_time64_t mono_ts, un
 
 				/* check idle time limit, if enabled */
 				if (idle_limit && idle_limit < mono_ts - last_active_ts && !graceful_shutdown) {
-					log_error(srv->errh, __FILE__, __LINE__,
+					log_notice(srv->errh, __FILE__, __LINE__,
 					  "[note] idle timeout %ds exceeded, "
 					  "initiating graceful shutdown", (int)idle_limit);
 					graceful_shutdown = 2; /* value 2 indicates idle timeout */
@@ -2316,6 +2322,18 @@ static int main_init_once (void) {
   #endif
     tzset();
 
+  #ifdef __MINGW32__
+    /* MSYS2 translates SHELL path even if MSYS_NO_PATHCONV=1
+     * lighttpd uses "/bin/sh" for consistency and substitutes "cmd.exe" later
+     * (__MINGW32__ is also set when mingw cross-compiler used under Cygwin) */
+    if (getenv("MSYSTEM")) { /* MSYS2 */
+        const char *shell = getenv("SHELL");
+        size_t len = shell ? strlen(shell) : 0;
+        if (len >= 11 && 0 == strcmp(shell+len-11, "\\bin\\sh.exe"))
+            setenv("SHELL", "/bin/sh", 1);
+    }
+  #endif
+
     return 1;
 }
 
@@ -2353,16 +2371,16 @@ int server_main (int argc, char ** argv) {
 
             if (NULL == srv->conns) rc = 0;
             if (2 == graceful_shutdown) { /* value 2 indicates idle timeout */
-                log_error(srv->errh, __FILE__, __LINE__,
+                log_notice(srv->errh, __FILE__, __LINE__,
                   "server stopped after idle timeout");
             } else if (!oneshot_fd) {
               #ifdef HAVE_SIGACTION
-                log_error(srv->errh, __FILE__, __LINE__,
+                log_notice(srv->errh, __FILE__, __LINE__,
                   "server stopped by UID = %d PID = %d",
                   (int)last_sigterm_info.si_uid,
                   (int)last_sigterm_info.si_pid);
               #else
-                log_error(srv->errh, __FILE__, __LINE__,
+                log_notice(srv->errh, __FILE__, __LINE__,
                   "server stopped");
               #endif
             }

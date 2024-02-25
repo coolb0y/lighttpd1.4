@@ -2227,7 +2227,7 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
             s->ssl_ctx, network_ssl_servername_callback);
         wolfSSL_CTX_set_servername_arg(s->ssl_ctx, srv);
        #else
-        log_error(srv->errh, __FILE__, __LINE__,
+        log_warn(srv->errh, __FILE__, __LINE__,
           "SSL: WARNING: SNI callbacks *crippled* in wolfSSL library build");
         UNUSED(network_ssl_servername_callback);
        #endif
@@ -2708,6 +2708,70 @@ SETDEFAULTS_FUNC(mod_openssl_set_defaults)
 }
 
 
+__attribute_cold__
+static int
+mod_wolfssl_write_err (SSL * const ssl, int wr, connection * const con,
+                       log_error_st * const errh)
+{
+    int ssl_r;
+    unsigned long err;
+
+    switch ((ssl_r = SSL_get_error(ssl, wr))) {
+      case SSL_ERROR_WANT_READ:
+        con->is_readable = -1;
+        return 0; /* try again later */
+      case SSL_ERROR_WANT_WRITE:
+        con->is_writable = -1;
+        return 0; /* try again later */
+      case SSL_ERROR_SYSCALL:
+        /* perhaps we have error waiting in our error-queue */
+        if (0 != (err = ERR_get_error())) {
+            do {
+                log_error(errh, __FILE__, __LINE__,
+                  "SSL: %d %d %s",ssl_r,wr,ERR_error_string(err,NULL));
+            } while((err = ERR_get_error()));
+        }
+        else if (wr == -1) {
+            /* no, but we have errno */
+            switch(errno) {
+              case EAGAIN:
+              case EINTR:
+             #if defined(__FreeBSD__) && defined(SF_NODISKIO)
+              case EBUSY:
+             #endif
+                return 0; /* try again later */
+              case EPIPE:
+              case ECONNRESET:
+                return -2;
+              default:
+                log_perror(errh, __FILE__, __LINE__,
+                  "SSL: %d %d", ssl_r, wr);
+                break;
+            }
+        }
+        else {
+            /* neither error-queue nor errno ? */
+            log_perror(errh, __FILE__, __LINE__,
+              "SSL (error): %d %d", ssl_r, wr);
+        }
+        break;
+
+      case SSL_ERROR_ZERO_RETURN:
+        /* clean shutdown on the remote side */
+        if (wr == 0) return -2;
+
+        __attribute_fallthrough__
+      default:
+        while((err = ERR_get_error()))
+            log_error(errh, __FILE__, __LINE__,
+              "SSL: %d %d %s", ssl_r, wr, ERR_error_string(err, NULL));
+        break;
+    }
+
+    return -1;
+}
+
+
     /* local_send_buffer is a static buffer of size (LOCAL_SEND_BUFSIZE)
      *
      * it has to stay at the same location all the time to satisfy the needs
@@ -2745,10 +2809,11 @@ connection_write_cq_ssl (connection * const con, chunkqueue * const cq, off_t ma
           : (uint32_t)max_bytes;
         int wr;
 
-        if (0 != chunkqueue_peek_data(cq, &data, &data_len, errh)) return -1;
+        if (0 != chunkqueue_peek_data(cq, &data, &data_len, errh, 1)) return -1;
         if (__builtin_expect( (0 == data_len), 0)) {
-            chunkqueue_remove_finished_chunks(cq);
-            continue;
+            if (!cq->first->file.busy)
+                chunkqueue_remove_finished_chunks(cq);
+            break; /* try again later */
         }
 
         /**
@@ -2769,62 +2834,20 @@ connection_write_cq_ssl (connection * const con, chunkqueue * const cq, off_t ma
             return -1;
         }
 
-        if (wr <= 0) {
-            int ssl_r;
-            unsigned long err;
-
-            switch ((ssl_r = SSL_get_error(ssl, wr))) {
-            case SSL_ERROR_WANT_READ:
-                con->is_readable = -1;
-                return 0; /* try again later */
-            case SSL_ERROR_WANT_WRITE:
-                con->is_writable = -1;
-                return 0; /* try again later */
-            case SSL_ERROR_SYSCALL:
-                /* perhaps we have error waiting in our error-queue */
-                if (0 != (err = ERR_get_error())) {
-                    do {
-                        log_error(errh, __FILE__, __LINE__,
-                          "SSL: %d %d %s",ssl_r,wr,ERR_error_string(err,NULL));
-                    } while((err = ERR_get_error()));
-                } else if (wr == -1) {
-                    /* no, but we have errno */
-                    switch(errno) {
-                    case EPIPE:
-                    case ECONNRESET:
-                        return -2;
-                    default:
-                        log_perror(errh, __FILE__, __LINE__,
-                          "SSL: %d %d", ssl_r, wr);
-                        break;
-                    }
-                } else {
-                    /* neither error-queue nor errno ? */
-                    log_perror(errh, __FILE__, __LINE__,
-                      "SSL (error): %d %d", ssl_r, wr);
-                }
-                break;
-
-            case SSL_ERROR_ZERO_RETURN:
-                /* clean shutdown on the remote side */
-
-                if (wr == 0) return -2;
-
-                __attribute_fallthrough__
-            default:
-                while((err = ERR_get_error())) {
-                    log_error(errh, __FILE__, __LINE__,
-                      "SSL: %d %d %s", ssl_r, wr, ERR_error_string(err, NULL));
-                }
-                break;
-            }
-            return -1;
-        }
+        if (wr <= 0)
+            return mod_wolfssl_write_err(ssl, wr, con, errh);
 
         chunkqueue_mark_written(cq, wr);
-        max_bytes -= wr;
 
-        if ((size_t) wr < data_len) break; /* try again later */
+        /* yield if wrote less than read or read less than requested
+         * (if starting cqlen was less than requested read amount, then
+         *  chunkqueue should be empty now, so no need to calculate that) */
+        if ((uint32_t)wr < data_len || data_len <(LOCAL_SEND_BUFSIZE < max_bytes
+                                                 ?LOCAL_SEND_BUFSIZE
+                                                 :(uint32_t)max_bytes))
+            break; /* try again later */
+
+        max_bytes -= wr;
     }
 
     return 0;
@@ -3515,12 +3538,14 @@ mod_openssl_ssl_conf_cmd (server *srv, plugin_config_socket *s)
                     break;
                   case 13:
                     if (buffer_eq_icase_ssn(v, "SessionTicket", 13)) {
+                      #ifdef HAVE_SESSION_TICKET
                         if (flag)
                             SSL_CTX_clear_options(s->ssl_ctx,
                                                   SSL_OP_NO_TICKET);
                         else
                             SSL_CTX_set_options(s->ssl_ctx,
                                                 SSL_OP_NO_TICKET);
+                      #endif
                         continue;
                     }
                     break;
