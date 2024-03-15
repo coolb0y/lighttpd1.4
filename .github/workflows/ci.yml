@@ -1,6 +1,14 @@
-name: On PRs
+name: CI
 
-on: [push, pull_request]
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - ci
+    tags:
+      - lighttpd-*
 
 concurrency:
   group: ${{github.workflow}}-${{github.head_ref}}
@@ -21,7 +29,8 @@ jobs:
           platform: ${{matrix.platform}}
       - name: Install packages
         run: |
-          sudo apt-get install cmake meson ninja-build pkg-config perl scons \
+          sudo apt-get install build-essential \
+            cmake meson ninja-build pkg-config scons \
             autoconf automake autotools-dev libtool m4 \
             nettle-dev gnutls-dev \
             libmbedtls-dev libnss3-dev libssl-dev libwolfssl-dev \
@@ -52,7 +61,8 @@ jobs:
           platform: ${{matrix.platform}}
       - name: Install packages
         run: |
-          sudo apt-get install cmake meson ninja-build pkg-config perl scons \
+          sudo apt-get install build-essential \
+            cmake meson ninja-build pkg-config scons \
             autoconf automake autotools-dev libtool m4 \
             nettle-dev gnutls-dev \
             libmbedtls-dev libnss3-dev libssl-dev libwolfssl-dev \
@@ -86,8 +96,7 @@ jobs:
       - name: Compile and Test
         run: |
           set -e
-          # TODO: figure out why krb5 libpq sasl not found by build
-          export NO_KRB5=1 NO_PGSQL=1 NO_SASL=1 NO_UNWIND=1
+          export NO_UNWIND=1
           cd "${{github.workspace}}" && scripts/ci-build.sh meson
 
   DragonflyBSD:
@@ -221,13 +230,13 @@ jobs:
           # PowerShell wait for it to exit
           & C:\setup.exe -qgnO -t | Out-Default
       - name: Compile and Test
-        #shell: C:\cygwin\bin\bash.exe --noprofile --norc -o igncr -eo pipefail '{0}'
-        shell: C:\cygwin\bin\bash.exe --login -o igncr -eo pipefail '{0}'
+        shell: C:\cygwin\bin\bash.exe --noprofile --norc -o igncr -eo pipefail '{0}'
         run: |
           set -e
           export PATH=/usr/bin:$(cygpath ${SYSTEMROOT})/system32
           export NO_PAM=1 NO_UNWIND=1 NO_WOLFSSL=1
-          cd "${{github.workspace}}" && scripts/ci-build.sh autobuild
+          export SHELL=/bin/dash
+          cd "${{github.workspace}}" && /bin/dash scripts/ci-build.sh autobuild
 
   Windows-VisualStudio:
     runs-on: windows-latest
@@ -280,7 +289,8 @@ jobs:
           # NO_GNUTLS=1 gnutls/socket.h can not find <sys/socket.h>
           # NO_MYSQL=1 build not finding mysql_config
           export NO_DBI=1 NO_GNUTLS=1 NO_KRB5=1 NO_MYSQL=1 NO_PAM=1 NO_UNWIND=1 NO_WOLFSSL=1
-          cd "${{github.workspace}}" && scripts/ci-build.sh autobuild
+          export SHELL=/bin/dash
+          cd "${{github.workspace}}" && /bin/dash scripts/ci-build.sh autobuild
 
   Linux-alpine-x86_64:
     runs-on: ubuntu-latest

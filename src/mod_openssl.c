@@ -1383,6 +1383,7 @@ network_ssl_servername_callback (SSL *ssl, int *al, void *srv)
 
 
 #if OPENSSL_VERSION_NUMBER < 0x10101000L \
+ || !(defined(_LP64) || defined(__LP64__) || defined(_WIN64)) \
  || defined(BORINGSSL_API_VERSION) \
  ||(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3060000fL)
 static unix_time64_t
@@ -1402,12 +1403,13 @@ mod_openssl_cert_is_active (const X509 *crt)
     const ASN1_TIME *notBefore = X509_get0_notBefore(crt);
     const ASN1_TIME *notAfter  = X509_get0_notAfter(crt);
   #if OPENSSL_VERSION_NUMBER < 0x10101000L \
+   || !(defined(_LP64) || defined(__LP64__) || defined(_WIN64)) \
    || defined(BORINGSSL_API_VERSION) \
    ||(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3060000fL)
     const unix_time64_t before = mod_openssl_asn1_time_to_posix(notBefore);
     const unix_time64_t after  = mod_openssl_asn1_time_to_posix(notAfter);
     const unix_time64_t now = log_epoch_secs;
-    return (before <= now && now <= after);
+    return (0 <= before && before <= now && now <= after);
   #else /*(-2 is an error from ASN1_TIME_cmp_time_t(); test cmp for -1, 0, 1)*/
     const unix_time64_t now = log_epoch_secs;
     const int before_cmp = ASN1_TIME_cmp_time_t(notBefore, (time_t)now);
@@ -1563,7 +1565,25 @@ mod_openssl_load_stapling_file (const char *file, log_error_st *errh, buffer *b)
 static unix_time64_t
 mod_openssl_asn1_time_to_posix (const ASN1_TIME *asn1time)
 {
-  #if defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3050000fL
+  #if defined(BORINGSSL_API_VERSION) && BORINGSSL_API_VERSION >= 19
+
+    int64_t t;
+    return ASN1_TIME_to_posix(asn1time, &t) ? (unix_time64_t)t : -1;
+
+  #elif defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER>=0x2050100fL
+
+    struct tm x;
+   #if LIBRESSL_VERSION_NUMBER >= 0x3050000fL
+    if (!ASN1_TIME_to_tm(asn1time, &x))
+        return -1;
+   #else /* LIBRESSL_VERSION_NUMBER >= 0x2050100fL */
+    if (-1 == ASN1_time_parse(asn1time->data, asn1time->length, &x, 0))
+        return -1;
+   #endif
+    time_t t = timegm(&x);
+    return (t != -1) ? TIME64_CAST(t) : t;
+
+  #elif defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER <0x3050000fL
     /* LibreSSL was forked from OpenSSL 1.0.1; does not have ASN1_TIME_diff */
 
     /*(Note: all certificate times are expected to use UTC)*/
@@ -1636,11 +1656,23 @@ mod_openssl_asn1_time_to_posix (const ASN1_TIME *asn1time)
 
   #else
 
+   #if OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined(BORINGSSL_API_VERSION)
+
+    struct tm x;
+    if (!ASN1_TIME_to_tm(asn1time, &x))
+        return -1;
+    time_t t = timegm(&x);
+    return (t != -1) ? TIME64_CAST(t) : t;
+
+   #else
+
     /* Note: this does not check for integer overflow of time_t! */
     int day, sec;
     return ASN1_TIME_diff(&day, &sec, NULL, asn1time)
       ? log_epoch_secs + day*86400 + sec
       : -1;
+
+   #endif
 
   #endif
 }
@@ -2611,7 +2643,7 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
 
 
 #define LIGHTTPD_DEFAULT_CIPHER_LIST \
-"EECDH+AESGCM:AES256+EECDH:CHACHA20:!SHA1:!SHA256:!SHA384"
+"EECDH+AESGCM:CHACHA20:!PSK:!DHE"
 
 
 static int

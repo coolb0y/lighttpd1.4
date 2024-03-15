@@ -35,7 +35,7 @@ extern "C" {
 
 #define LSHPACK_MAJOR_VERSION 2
 #define LSHPACK_MINOR_VERSION 3
-#define LSHPACK_PATCH_VERSION 1
+#define LSHPACK_PATCH_VERSION 3
 
 #define lshpack_strlen_t lsxpack_strlen_t
 #define LSHPACK_MAX_STRLEN LSXPACK_MAX_STRLEN
@@ -225,6 +225,8 @@ lshpack_dec_set_max_capacity (struct lshpack_dec *, unsigned);
 #endif
 #endif
 
+#ifndef STAILQ_FOREACH
+
 #ifndef SIMPLEQ_FOREACH
 #include "../compat/sys/queue.h"
 #endif
@@ -241,6 +243,8 @@ lshpack_dec_set_max_capacity (struct lshpack_dec *, unsigned);
 #define STAILQ_NEXT             SIMPLEQ_NEXT
 #define STAILQ_REMOVE_HEAD      SIMPLEQ_REMOVE_HEAD
 #define STAILQ_FOREACH          SIMPLEQ_FOREACH
+#endif
+
 #endif
 
 #if defined(STAILQ_FIRST) && defined(STAILQ_NEXT) && !defined(STAILQ_FOREACH)

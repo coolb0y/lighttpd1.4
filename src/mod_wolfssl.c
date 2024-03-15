@@ -1430,11 +1430,12 @@ mod_openssl_asn1_time_to_posix (const ASN1_TIME *asn1time)
   #if LIBWOLFSSL_VERSION_HEX >= 0x05000000 /*(stub func filled in v5.0.0)*/
     /* Note: up to at least wolfSSL 4.5.0 (current version as this is written)
      * wolfSSL_ASN1_TIME_diff() is a stub function which always returns 0 */
-    /* Note: this does not check for integer overflow of time_t! */
-    int day, sec;
-    return wolfSSL_ASN1_TIME_diff(&day, &sec, NULL, asn1time)
-      ? log_epoch_secs + day*86400 + sec
-      : -1;
+    /* prefer wolfSSL_ASN1_TIME_to_tm() instead of wolfSSL_ASN1_TIME_diff() */
+    struct tm x;
+    if (!wolfSSL_ASN1_TIME_to_tm(asn1time, &x))
+        return -1;
+    time_t t = timegm(&x);
+    return (t != -1) ? TIME64_CAST(t) : t;
   #else
     UNUSED(asn1time);
     return -1;
@@ -2252,10 +2253,10 @@ network_init_ssl (server *srv, plugin_config_socket *s, plugin_data *p)
 
 
 /* expanded from:
- * $ openssl ciphers 'EECDH+AESGCM:AES256+EECDH:CHACHA20:!SHA1:!SHA256:!SHA384'
+ * $ openssl ciphers 'EECDH+AESGCM:CHACHA20:!PSK:!DHE'
  */
 #define LIGHTTPD_DEFAULT_CIPHER_LIST \
-"TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_128_CCM_SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-CCM8:ECDHE-ECDSA-AES256-CCM:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-CHACHA20-POLY1305:RSA-PSK-CHACHA20-POLY1305:DHE-PSK-CHACHA20-POLY1305:ECDHE-PSK-CHACHA20-POLY1305:PSK-CHACHA20-POLY1305"
+"TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_128_CCM_SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
 
 
 static int
