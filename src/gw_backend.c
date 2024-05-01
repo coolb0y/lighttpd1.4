@@ -1915,6 +1915,8 @@ static void gw_conditional_tcp_fin(gw_handler_ctx * const hctx, request_st * con
     if (!chunkqueue_is_empty(&hctx->wb))return;
     if (!hctx->host->tcp_fin_propagate) return;
     if (hctx->gw_mode == GW_AUTHORIZER) return;
+    if (hctx->state == GW_STATE_CONNECT_DELAYED)
+        return;
     if (r->conf.stream_request_body & FDEVENT_STREAM_REQUEST_BACKEND_SHUT_WR)
         return;
 
@@ -1955,6 +1957,33 @@ static handler_t gw_write_refill_wb(gw_handler_ctx * const hctx, request_st * co
             chunkqueue_append_chunkqueue(&hctx->wb, &r->reqbody_queue);
     }
     return HANDLER_GO_ON;
+}
+
+__attribute_cold__
+static handler_t gw_network_backend_write_error(gw_handler_ctx * const hctx, request_st * const r) {
+  #ifdef _WIN32
+    switch(WSAGetLastError())
+  #else
+    switch(errno)
+  #endif
+    {
+     #ifdef _WIN32
+      case WSAENOTCONN:
+      case WSAECONNRESET:
+     #else
+      case EPIPE:
+      case ENOTCONN:
+      case ECONNRESET:
+     #endif
+        log_error(r->conf.errh, __FILE__, __LINE__,
+          "connection was dropped after accept() "
+          "(perhaps the gw process died), write-offset: %lld socket: %s",
+          (long long)hctx->wb.bytes_out, hctx->proc->connection_name->ptr);
+        return HANDLER_ERROR;
+      default:
+        log_perror(r->conf.errh, __FILE__, __LINE__, "write failed");
+        return HANDLER_ERROR;
+    }
 }
 
 static handler_t gw_write_request(gw_handler_ctx * const hctx, request_st * const r) {
@@ -2047,58 +2076,40 @@ static handler_t gw_write_request(gw_handler_ctx * const hctx, request_st * cons
         /*(disable Nagle algorithm if streaming and content-length unknown)*/
         if (AF_UNIX != hctx->host->family) {
             if (r->reqbody_length < 0) {
-                if (-1 == fdevent_set_tcp_nodelay(hctx->fd, 1)) {
-                    /*(error, but not critical)*/
+                /*(skip if hctx->create_env() already called
+                 * gw_set_transparent() to fdevent_set_tcp_nodelay() */
+                if (hctx->state != GW_STATE_WRITE) {
+                    if (-1 == fdevent_set_tcp_nodelay(hctx->fd, 1)) {
+                        /*(error, but not critical)*/
+                    }
                 }
             }
         }
 
         hctx->read_ts = log_monotonic_secs;
-        fdevent_fdnode_event_add(hctx->ev, hctx->fdn, FDEVENT_IN|FDEVENT_RDHUP);
+        {
+            int events = fdevent_fdnode_interest(hctx->fdn)
+                       | FDEVENT_IN|FDEVENT_RDHUP;
+            if (chunkqueue_is_empty(&hctx->wb))
+                events &= ~FDEVENT_OUT; /*(no data ready; avoid extra syscall)*/
+            fdevent_fdnode_event_set(hctx->ev, hctx->fdn, events);
+        }
         gw_set_state(hctx, GW_STATE_WRITE);
         __attribute_fallthrough__
     case GW_STATE_WRITE:
         if (!chunkqueue_is_empty(&hctx->wb)) {
-            log_error_st * const errh = r->conf.errh;
           #if 0
             if (hctx->conf.debug > 1) {
-                log_debug(errh, __FILE__, __LINE__, "sdsx",
+                log_debug(r->conf.errh, __FILE__, __LINE__,
                   "send data to backend (fd=%d), size=%zu",
                   hctx->fd, chunkqueue_length(&hctx->wb));
             }
           #endif
             off_t bytes_out = hctx->wb.bytes_out;
             if (r->con->srv->network_backend_write(hctx->fd, &hctx->wb,
-                                                   MAX_WRITE_LIMIT, errh) < 0) {
-              #ifdef _WIN32
-                switch(WSAGetLastError())
-              #else
-                switch(errno)
-              #endif
-                {
-                #ifdef _WIN32
-                case WSAENOTCONN:
-                case WSAECONNRESET:
-                #else
-                case EPIPE:
-                case ENOTCONN:
-                case ECONNRESET:
-                #endif
-                    /* the connection got dropped after accept()
-                     * we don't care about that --
-                     * if you accept() it, you have to handle it.
-                     */
-                    log_error(errh, __FILE__, __LINE__,
-                      "connection was dropped after accept() "
-                      "(perhaps the gw process died), "
-                      "write-offset: %lld socket: %s",
-                      (long long)hctx->wb.bytes_out,
-                      hctx->proc->connection_name->ptr);
-                    return HANDLER_ERROR;
-                default:
-                    log_perror(errh, __FILE__, __LINE__, "write failed");
-                    return HANDLER_ERROR;
-                }
+                                                   MAX_WRITE_LIMIT,
+                                                   r->conf.errh) < 0) {
+                return gw_network_backend_write_error(hctx, r);
             }
             else if (hctx->wb.bytes_out > bytes_out) {
                 hctx->write_ts = hctx->proc->last_used = log_monotonic_secs;
