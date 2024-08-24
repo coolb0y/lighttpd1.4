@@ -104,6 +104,8 @@ static void server_status_running (JNIEnv *jenv)
 }
 #define server_status_running(srv) server_status_running(jenv);
 
+int server_main(int argc, char ** argv, JNIEnv *jenv);
+
 /**
  * @brief Launches the server in JNI use case.
  *
