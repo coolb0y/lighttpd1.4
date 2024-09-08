@@ -955,6 +955,9 @@ set(SERVER_SRC
 
 if(BUILD_LIBRARY)
 	add_library(lighttpd ${SERVER_SRC} ${COMMON_SRC} ${BUILTIN_MODS})
+	if(WITH_JAVA_NATIVE_INTERFACE)
+		target_link_libraries(lighttpd glob)
+	endif()
 	if (WITH_ANDROID_NDK_SYSLOG_INTERCEPT)
 		target_link_libraries(lighttpd log)
 	endif()
