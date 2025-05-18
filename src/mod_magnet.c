@@ -33,8 +33,8 @@
 #include <string.h>
 /*#include <setjmp.h>*//*(not currently used)*/
 
-#include <lua.h>
-#include <lauxlib.h>
+#include "../../lua/lua.h"
+#include "../../lua/lauxlib.h"
 
 #define MAGNET_RESTART_REQUEST      99
 

@@ -21,7 +21,7 @@ set(CPACK_SOURCE_IGNORE_FILES "/\\\\.;~$;/_;build/;CMakeFiles/;CMakeCache;gz$;Ma
 include(CPack)
 
 include(GNUInstallDirs)
-
+include_directories(${LUA_INCLUDE_DIR})
 add_subdirectory(src build)
 add_subdirectory(doc)
 add_subdirectory(tests)

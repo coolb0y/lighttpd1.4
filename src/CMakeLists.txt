@@ -39,7 +39,7 @@ option(WITH_ZSTD "with zstd-support for mod_deflate [default: off]")
 option(WITH_KRB5 "with Kerberos5-support for mod_auth [default: off]")
 option(WITH_LDAP "with LDAP-support for mod_auth mod_vhostdb_ldap [default: off]")
 option(WITH_PAM "with PAM-support for mod_auth [default: off]")
-option(WITH_LUA "with lua for mod_magnet [default: off]")
+option(WITH_LUA "with lua for mod_magnet [default: on]" ON)
 option(WITH_LUA_VERSION "specify lua version for mod_magnet")
 # option(WITH_VALGRIND "with internal support for valgrind [default: off]")
 option(WITH_FAM "fam/gamin for reducing number of stat() calls [default: off]")
@@ -49,6 +49,14 @@ option(WITH_LIBUNWIND "with libunwind to print backtraces in asserts [default: o
 option(WITH_MAXMINDDB "with MaxMind GeoIP2-support mod_maxminddb [default: off]")
 option(WITH_SASL "with SASL-support for mod_authn_sasl [default: off]")
 option(WITH_XXHASH "with system-provided xxhash [default: off]")
+set(LUA_INCLUDE_DIR "/home/cyberboy/Desktop/react-native-static-server/lua/include")
+set(LUA_LIBRARY "/home/cyberboy/Desktop/react-native-static-server/android/.cxx/Debug/2x44o286/arm64-v8a/sysroot/lib/liblua.so")
+include_directories(${LUA_INCLUDE_DIR})
+# Assuming your executable is called lighttpd and mod_magnet is built into it
+
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-as-needed -L/home/cyberboy/Desktop/react-native-static-server/android/.cxx/Debug/2x44o286/arm64-v8a/sysroot/lib -llua")
+
+
 
 if(WITH_JAVA_NATIVE_INTERFACE)
 	set(BUILD_LIBRARY 1)
@@ -767,18 +775,6 @@ else()
 	unset(HAVE_PAM)
 endif()
 
-if(WITH_LUA)
-	if(WITH_LUA_VERSION)
-		pkg_search_module(LUA REQUIRED ${WITH_LUA_VERSION})
-	else()
-		pkg_search_module(LUA REQUIRED lua54 lua5.4 lua-5.4 lua53 lua5.3 lua-5.3 lua52 lua5.2 lua-5.2 lua51 lua5.1 lua-5.1 lua)
-	endif()
-	message(STATUS "found lua at: INCDIR: ${LUA_INCLUDE_DIRS} LIBDIR: ${LUA_LIBRARY_DIRS} LDFLAGS: ${LUA_LDFLAGS} CFLAGS: ${LUA_CFLAGS}")
-	set(HAVE_LUA_H  1 "Have liblua header")
-else()
-	unset(HAVE_LUA_H)
-endif()
-
 if(WITH_FAM AND NOT HAVE_SYS_INOTIFY_H AND NOT HAVE_KQUEUE)
 	check_include_files(fam.h HAVE_FAM_H)
 	check_library_exists(fam FAMOpen2 "" HAVE_LIBFAM)
@@ -808,6 +804,7 @@ if(HAVE_DLFCN_H)
 else()
 	unset(HAVE_LIBDL)
 endif()
+
 
 set(LIGHTTPD_VERSION_ID 0x104${PROJECT_VERSION_PATCH})
 set(PACKAGE_NAME "${CMAKE_PROJECT_NAME}")
@@ -849,6 +846,7 @@ set(COMMON_SRC
 	fdlog.c
 	sys-setjmp.c
 	ck.c
+	mod_magnet_cache.c
 )
 if(WIN32)
 	set(COMMON_SRC ${COMMON_SRC} fdevent_win32.c fs_win32.c)
@@ -867,6 +865,7 @@ endif()
     mod_evhost.c
     mod_fastcgi.c
     mod_scgi.c
+	mod_magnet.c
   )
 
 if(BUILD_STATIC)
@@ -888,6 +887,7 @@ if(BUILD_STATIC)
     mod_vhostdb.c mod_vhostdb_api.c
     mod_webdav.c
     mod_wstunnel.c
+	mod_magnet.c
   )
 endif()
 
@@ -1057,11 +1057,34 @@ if(HAVE_PCRE)
 	add_target_properties(test_mod COMPILE_FLAGS ${PCRE_CFLAGS})
 endif()
 
+
+
 if(WITH_LUA)
-	add_and_install_library(mod_magnet "mod_magnet.c;mod_magnet_cache.c;algo_hmac.c")
-	target_link_libraries(mod_magnet ${LUA_LDFLAGS} ${CRYPTO_LIBRARY})
-	add_target_properties(mod_magnet COMPILE_FLAGS ${LUA_CFLAGS})
+    # Set paths manually since you're cross-compiling
+    set(LUA_INCLUDE_DIR "/home/cyberboy/Desktop/react-native-static-server/lua")
+    set(LUA_LIBRARY "/home/cyberboy/Desktop/react-native-static-server/android/.cxx/Debug/2x44o286/arm64-v8a/sysroot/lib/liblua.so")
+
+    if(EXISTS "${LUA_INCLUDE_DIR}/lua.h" AND EXISTS "${LUA_LIBRARY}")
+        set(HAVE_LUA_H 1)
+        set(LUA_CFLAGS "-I${LUA_INCLUDE_DIR}" CACHE STRING "Lua compiler flags")
+        set(LUA_LDFLAGS "${LUA_LIBRARY}" CACHE STRING "Lua linker flags")
+        message(STATUS "Found Lua headers at: ${LUA_INCLUDE_DIR}")
+        message(STATUS "Found Lua library at: ${LUA_LIBRARY}")
+    else()
+        message(FATAL_ERROR "Lua headers or library not found!")
+    endif()
+
+    # Apply flags globally if needed
+    include_directories(${LUA_INCLUDE_DIR})
+    link_libraries(${LUA_LIBRARY})
 endif()
+
+if(WITH_LUA)
+    add_and_install_library(mod_magnet "mod_magnet.c;mod_magnet_cache.c;algo_hmac.c")
+    target_link_libraries(mod_magnet PUBLIC lua ${CRYPTO_LIBRARY})  # Link to Lua target
+    target_include_directories(mod_magnet PUBLIC ${LUA_INCLUDE_DIR})
+endif()
+
 
 if(WITH_MAXMINDDB)
 	add_and_install_library(mod_maxminddb mod_maxminddb.c)
@@ -1290,3 +1313,4 @@ install(TARGETS ${L_INSTALL_TARGETS}
 	LIBRARY DESTINATION lib
 	ARCHIVE DESTINATION lib/static)
 endif()
+target_link_libraries(lighttpd ${LUA_LIBRARY})
